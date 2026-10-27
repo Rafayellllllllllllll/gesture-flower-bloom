@@ -73,6 +73,7 @@ const flowerMaterial = new THREE.ShaderMaterial({
     uniform float uPixelRatio;
     uniform float uSway;
     varying vec3 vColor;
+    varying float vAlpha;
     void main() {
       // 核心插值：花苞位置 -> 绽放位置，全部在顶点着色器里做，保证性能
       vec3 pos = mix(aClosed, aOpen, uSpread);
@@ -81,19 +82,25 @@ const flowerMaterial = new THREE.ShaderMaterial({
       pos.x += flutter + sin(uTime * 1.3 + aSeed * 13.0) * uSway;
       pos.y += cos(uTime * 1.7 + aSeed * 17.0) * 0.05 * uSpread;
       vColor = aColor;
+      // 每个粒子透明度略有不同，避免成千上万个点叠加时全变成一片白
+      vAlpha = 0.55 + 0.45 * aSeed;
       vec4 mv = modelViewMatrix * vec4(pos, 1.0);
       gl_Position = projectionMatrix * mv;
-      gl_PointSize = aSize * uPixelRatio * (260.0 / -mv.z);
+      // 修复前这里是 260.0 / 距离：手机上单个点能到 200~300 像素，
+      // 12000 个点叠加后只能看到一个大白块。现在按 18.0 / 距离算，
+      // 手机上单个点约 5~10 像素，花苞时再缩小 30%，才能看清单颗粒子。
+      gl_PointSize = aSize * uPixelRatio * (18.0 / -mv.z) * (0.7 + 0.3 * uSpread);
     }
   `,
   fragmentShader: `
     varying vec3 vColor;
+    varying float vAlpha;
     void main() {
-      // 圆形柔边 + 光晕：越靠近圆心越亮
+      // 圆形柔边 + 光晕：越靠近圆心越亮，但亮度上限压低，不再叠加成纯白
       float d = length(gl_PointCoord - vec2(0.5));
-      float alpha = smoothstep(0.5, 0.05, d);
+      float alpha = smoothstep(0.5, 0.10, d) * vAlpha * 0.9;
       if (alpha < 0.01) discard;
-      gl_FragColor = vec4(vColor * (0.7 + 0.6 * (1.0 - d * 2.0)), alpha);
+      gl_FragColor = vec4(vColor * (0.55 + 0.45 * (1.0 - d * 2.0)), alpha);
     }
   `,
 });
@@ -138,7 +145,7 @@ function buildFlower(count) {
       cy = Math.sin(ph) * Math.sin(th) * rr;
       cz = Math.cos(ph) * rr * 0.6 + 0.1;
       ox = cx * 1.5; oy = cy * 1.5; oz = cz + 0.25;
-      col = GOLD; size = 2.2 + Math.random() * 2.0;
+      col = GOLD; size = 1.0 + Math.random() * 1.0;
     } else {
       const petal = Math.floor(Math.random() * PETALS);
       const angle = (petal / PETALS) * Math.PI * 2 + (Math.random() - 0.5) * 0.08;
@@ -150,17 +157,18 @@ function buildFlower(count) {
       ox = Math.cos(angle) * radial - Math.sin(angle) * lateral;
       oy = Math.sin(angle) * radial + Math.cos(angle) * lateral;
       oz = Math.sin(Math.PI * u) * 0.55 + v * v * 0.15;
-      // 花苞：同一瓣的粒子向中心收拢，尖部粒子略抬高，形成水滴形花苞
-      const budR = 0.30 + 0.12 * (1 - u);
+      // 花苞：不再挤成一个小球，改成竖直水滴形——根部在下、尖部在上收拢，
+      // 粒子沿 1.6 个单位的高度铺开，密度一下降下来，才不会糊成一团
       const budAngle = angle + v * 0.25;
-      cx = Math.cos(budAngle) * budR * 0.75 + (Math.random() - 0.5) * 0.06;
-      cy = Math.sin(budAngle) * budR * 0.75 + u * 0.35 - 0.10;
-      cz = 0.15 + (Math.random() - 0.5) * 0.08;
+      const budWidth = 0.48 * (1 - u * 0.65);
+      cx = Math.cos(budAngle) * budWidth + v * 0.10 * (1 - u);
+      cy = -0.70 + u * 1.60;
+      cz = 0.18 + Math.sin(budAngle) * 0.10 + (Math.random() - 0.5) * 0.08;
       // 颜色渐变：根部偏金粉，中部粉，尖部偏紫，个别瓣带一点浅粉
       const petalTint = petal % 2 === 0 ? LIGHT : PINK;
       col = u < 0.5 ? mixColor(GOLD, PINK, u * 2) : mixColor(PINK, petalTint === LIGHT ? LIGHT : PURPLE, (u - 0.5) * 2);
       if (petalTint === LIGHT && u > 0.5) col = mixColor(PINK, LIGHT, (u - 0.5) * 2);
-      size = 1.6 + Math.random() * 2.6;
+      size = 0.8 + Math.random() * 1.0;
     }
     closed[i * 3] = cx; closed[i * 3 + 1] = cy; closed[i * 3 + 2] = cz;
     open[i * 3] = ox; open[i * 3 + 1] = oy; open[i * 3 + 2] = oz;
