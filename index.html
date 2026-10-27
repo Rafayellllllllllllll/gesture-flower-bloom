@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>手势花朵 · 指尖绽放</title>
+<link rel="stylesheet" href="style.css" />
+<!-- Three.js：用 ES Module + importmap，从 CDN 引入 -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+<!-- MediaPipe Hands：UMD 版，提供 21 个手部关键点 -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+</head>
+<body>
+  <!-- 摄像头画面：作为背景，镜像显示，符合自拍直觉 -->
+  <video id="camera" playsinline muted autoplay></video>
+  <div id="video-dim"></div>
+
+  <!-- Three.js 粒子花朵画布（透明背景，这样能透出摄像头画面） -->
+  <canvas id="scene"></canvas>
+  <!-- 手部骨架画布：只画关键点连线，不拦截点击 -->
+  <canvas id="skeleton"></canvas>
+
+  <main class="ui">
+    <header class="card title-card">
+      <h1>🌸 手势花朵 · 指尖绽放</h1>
+      <p class="subtitle">握拳，花朵收成花苞；张开手掌，花朵在指尖绽放。</p>
+      <div class="status-row">
+        <span id="status" class="pill">等待开启摄像头…</span>
+        <span id="hand-state" class="pill soft">未检测到手</span>
+      </div>
+    </header>
+
+    <section class="card controls">
+      <div class="btn-row">
+        <button id="btn-camera" class="btn primary">开启摄像头</button>
+        <button id="btn-demo" class="btn">演示模式</button>
+        <button id="btn-retry" class="btn" hidden>重新尝试</button>
+      </div>
+
+      <div class="meters">
+        <label>
+          <span>手掌张开度 tension <b id="tension-value">0.00</b></span>
+          <span class="meter"><i id="tension-bar"></i></span>
+        </label>
+        <label>
+          <span>绽放程度 spread <b id="spread-value">0.00</b></span>
+          <span class="meter"><i id="spread-bar"></i></span>
+        </label>
+        <p id="flower-state" class="flower-state">现在是：花苞（聚合中）</p>
+      </div>
+
+      <div class="options">
+        <label class="check"><input type="checkbox" id="opt-skeleton" checked /> 显示手部关键点连线</label>
+        <label class="check"><input type="checkbox" id="opt-video" checked /> 摄像头画面作背景</label>
+        <label class="check"><input type="checkbox" id="opt-mirror" checked /> 镜像画面</label>
+        <label class="select-wrap">
+          粒子数量
+          <select id="opt-count">
+            <option value="5000">5000</option>
+            <option value="12000" selected>12000（默认）</option>
+            <option value="20000">20000</option>
+          </select>
+        </label>
+        <label class="range-wrap">
+          背景亮度
+          <input type="range" id="opt-dim" min="0" max="80" value="35" />
+        </label>
+      </div>
+
+      <p id="error" class="error" hidden></p>
+      <p class="hint">小提示：把手放在画面中央，先握拳，再慢慢张开。光线亮一点、背景干净一点，识别会更稳。没有摄像头时，点“演示模式”也能看到花开花合。</p>
+
+      <details class="formula">
+        <summary>张开度是怎么算的？点开看公式</summary>
+        <p>取手腕（关键点 0）到 4 根手指指尖（8、12、16、20）的平均距离，记为 <code>d_指尖</code>；</p>
+        <p>取手腕到 4 个指根关节（5、9、13、17）的平均距离，记为 <code>d_指根</code>；</p>
+        <p><code>ratio = d_指尖 / d_指根</code>，握拳时约 1.25，张开时约 1.95；</p>
+        <p><code>tension = clamp((ratio - 1.25) / (1.95 - 1.25), 0, 1)</code>，再做平滑；</p>
+        <p><code>spread = smoothstep(0.32, 0.66, tension)</code>，即 tension 小于 0.32 为花苞、大于 0.66 为全开，中间平滑过渡；</p>
+        <p>每帧再做缓动：<code>currentSpread += (targetSpread - currentSpread) * 0.1</code>。</p>
+      </details>
+    </section>
+  </main>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>
