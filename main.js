@@ -116,16 +116,94 @@ const PINK = [1.0, 0.36, 0.56];
 const PURPLE = [0.70, 0.53, 1.0];
 const LIGHT = [1.0, 0.78, 0.87];
 
-// ---------- 生成粒子花朵 ----------
-// 极坐标花瓣：6 瓣，每瓣由“沿瓣长度 u”和“横向 v”决定。
-// 瓣宽轮廓 w(u) = sin(pi * u^0.85)，根部和尖部收窄、中部最宽。
+// ---------- 生成粒子花朵（2026-10-28 重做版） ----------
+// 目标：第一眼就是一朵花，不是光柱、烟雾或喷泉。
+// 做法：用参数化三维花瓣曲面，在曲面内部采样粒子，而不是只画几条线。
+//
+// 结构：3 层、共 12 片花瓣，呈放射状交错排列
+//   后层 5 片：最长、最宽、位置最靠后（z 负），颜色偏蓝紫/冰蓝
+//   中层 4 片：居中，颜色偏桃红/紫罗兰
+//   前层 3 片：最短、最靠前（z 正）、杯状弯曲最大，颜色偏玫红/樱花粉/奶油白
+// 每片花瓣是椭圆形/水滴形曲面：沿瓣方向 u（0=根部，1=尖部），
+// 横向半宽 halfW(u) = W * sin(pi * u^1.15)^0.8，根部收窄、中部最宽、尖部圆收。
+// 花瓣曲面还有杯状弯曲（z 随 u 拱起、横向二次弯曲）和每瓣独立的
+// 小倾角、起伏，让花瓣不在同一平面，有真实的前后纵深。
+//
+// 花心：15% 的粒子。60% 构成金色球形花心，40% 是向外探出的花蕊点，
+// 颜色在明亮金黄与暖白之间过渡，盛开时在花瓣前方、花苞时被包在里面。
+//
+// 颜色：每片花瓣有自己的“根部色 -> 尖部色”渐变，同一片内按 u 平滑过渡，
+// 边缘再向奶油白提亮一点，形成柔和轮廓。配色覆盖玫红、樱花粉、桃红、
+// 紫罗兰、淡紫、蓝紫、冰蓝、青色、奶油白和少量金色，不再只有粉+金。
+//
+// 密度：横向采样用带符号平方 v' = sign(v)*v^2，让粒子向花瓣中心线集中、
+// 边缘逐渐稀疏；u 接近均匀采样，保证整片花瓣都被填满，不是只有边缘。
+const ROSE = [0.93, 0.20, 0.45];
+const CHERRY = [1.00, 0.55, 0.70];
+const PEACH = [1.00, 0.65, 0.55];
+const VIOLET = [0.62, 0.35, 0.95];
+const LILAC = [0.78, 0.62, 1.00];
+const BLUEPURPLE = [0.45, 0.40, 0.95];
+const ICEBLUE = [0.60, 0.85, 1.00];
+const CYAN = [0.40, 0.90, 0.90];
+const CREAM = [1.00, 0.97, 0.88];
+const WARMWHITE = [1.00, 0.98, 0.92];
+
+// 每层：片数、长度、宽度、深度、杯状弯曲、每片的渐变（根部->尖部）
+const PETAL_LAYERS = [
+  {
+    count: 5, length: 3.00, width: 0.98, z: -0.55, curl: 0.20, offset: 0,
+    gradients: [
+      [LILAC, BLUEPURPLE], [ICEBLUE, VIOLET], [LILAC, BLUEPURPLE],
+      [CYAN, BLUEPURPLE], [ICEBLUE, VIOLET],
+    ],
+  },
+  {
+    count: 4, length: 2.65, width: 0.90, z: -0.10, curl: 0.35, offset: 0.78,
+    gradients: [
+      [PEACH, VIOLET], [CHERRY, ROSE], [LILAC, VIOLET], [PEACH, CHERRY],
+    ],
+  },
+  {
+    count: 3, length: 2.15, width: 0.82, z: 0.40, curl: 0.50, offset: 0.35,
+    gradients: [
+      [CREAM, ROSE], [CREAM, CHERRY], [PEACH, ROSE],
+    ],
+  },
+];
+// 展平成一片花瓣的清单，带每瓣的倾角（绕瓣长轴的小旋转）和起伏相位
+const PETALS = [];
+for (const layer of PETAL_LAYERS) {
+  for (let k = 0; k < layer.count; k++) {
+    PETALS.push({
+      length: layer.length,
+      width: layer.width,
+      z: layer.z,
+      curl: layer.curl,
+      angle: layer.offset + (k / layer.count) * Math.PI * 2,
+      tilt: (Math.random() - 0.5) * 0.30,
+      wobble: Math.random() * Math.PI * 2,
+      inner: layer.gradients[k % layer.gradients.length][0],
+      outer: layer.gradients[k % layer.gradients.length][1],
+      weight: layer.length * layer.width,
+    });
+  }
+}
+const PETAL_TOTAL_WEIGHT = PETALS.reduce((s, p) => s + p.weight, 0);
+function pickPetal() {
+  let r = Math.random() * PETAL_TOTAL_WEIGHT;
+  for (const p of PETALS) {
+    r -= p.weight;
+    if (r <= 0) return p;
+  }
+  return PETALS[PETALS.length - 1];
+}
+
 function buildFlower(count) {
   if (flowerPoints) {
     flowerGroup.remove(flowerPoints);
     flowerPoints.geometry.dispose();
   }
-  const PETALS = 6;
-  const LENGTH = 2.7;
   const closed = new Float32Array(count * 3);
   const open = new Float32Array(count * 3);
   const colors = new Float32Array(count * 3);
@@ -134,47 +212,89 @@ function buildFlower(count) {
 
   for (let i = 0; i < count; i++) {
     const r = Math.random();
-    const isCenter = r < 0.12;
-    let cx, cy, cz, ox, oy, oz, col, size;
-    if (isCenter) {
-      // 花心：金色小球，闭合和绽放时都在中心，只是绽放时稍大
+    let cx, cy, cz, ox, oy, oz, col, size, seed;
+    seed = Math.random();
+
+    if (r < 0.15) {
+      // ---- 花心 / 花蕊 ----
+      const isStamen = Math.random() < 0.40;
       const th = Math.random() * Math.PI * 2;
       const ph = Math.acos(2 * Math.random() - 1);
-      const rr = 0.28 * Math.cbrt(Math.random());
-      cx = Math.sin(ph) * Math.cos(th) * rr;
-      cy = Math.sin(ph) * Math.sin(th) * rr;
-      cz = Math.cos(ph) * rr * 0.6 + 0.1;
-      ox = cx * 1.5; oy = cy * 1.5; oz = cz + 0.25;
-      col = GOLD; size = 1.0 + Math.random() * 1.0;
+      const rr = isStamen
+        ? 0.42 + Math.random() * 0.28
+        : 0.42 * Math.cbrt(Math.random());
+      ox = Math.sin(ph) * Math.cos(th) * rr;
+      oy = Math.sin(ph) * Math.sin(th) * rr;
+      oz = 0.35 + Math.cos(ph) * rr * 0.6;
+      // 花苞时花心收得更小、藏得更靠后，让折叠的花瓣包住它
+      cx = ox * 0.65;
+      cy = oy * 0.65;
+      cz = 0.15;
+      const t = Math.random();
+      col = mixColor(GOLD, WARMWHITE, t);
+      if (isStamen && Math.random() < 0.25) col = WARMWHITE; // 花蕊尖端亮点
+      size = isStamen ? 0.7 + Math.random() * 0.5 : 0.9 + Math.random() * 0.6;
     } else {
-      const petal = Math.floor(Math.random() * PETALS);
-      const angle = (petal / PETALS) * Math.PI * 2 + (Math.random() - 0.5) * 0.08;
-      const u = Math.pow(Math.random(), 0.75); // 沿瓣方向 0=根部，1=尖部
-      const v = Math.random() * 2 - 1; // 横向 -1~1
-      const width = Math.sin(Math.PI * Math.pow(u, 0.85)) * 0.62;
-      const radial = u * LENGTH;
-      const lateral = v * width;
-      ox = Math.cos(angle) * radial - Math.sin(angle) * lateral;
-      oy = Math.sin(angle) * radial + Math.cos(angle) * lateral;
-      oz = Math.sin(Math.PI * u) * 0.55 + v * v * 0.15;
-      // 花苞：不再挤成一个小球，改成竖直水滴形——根部在下、尖部在上收拢，
-      // 粒子沿 1.6 个单位的高度铺开，密度一下降下来，才不会糊成一团
-      const budAngle = angle + v * 0.25;
-      const budWidth = 0.48 * (1 - u * 0.65);
-      cx = Math.cos(budAngle) * budWidth + v * 0.10 * (1 - u);
-      cy = -0.70 + u * 1.60;
-      cz = 0.18 + Math.sin(budAngle) * 0.10 + (Math.random() - 0.5) * 0.08;
-      // 颜色渐变：根部偏金粉，中部粉，尖部偏紫，个别瓣带一点浅粉
-      const petalTint = petal % 2 === 0 ? LIGHT : PINK;
-      col = u < 0.5 ? mixColor(GOLD, PINK, u * 2) : mixColor(PINK, petalTint === LIGHT ? LIGHT : PURPLE, (u - 0.5) * 2);
-      if (petalTint === LIGHT && u > 0.5) col = mixColor(PINK, LIGHT, (u - 0.5) * 2);
-      size = 0.8 + Math.random() * 1.0;
+      // ---- 花瓣：在曲面内部采样 ----
+      const petal = pickPetal();
+      const u = Math.pow(Math.random(), 0.90); // 沿瓣方向，接近均匀，整片填满
+      const vRaw = Math.random() * 2 - 1;
+      const v = Math.sign(vRaw) * vRaw * vRaw; // 向中心线集中，边缘稀疏
+      const halfW = petal.width * Math.pow(Math.sin(Math.PI * Math.pow(u, 1.15)), 0.8);
+      const radial = u * petal.length;
+      const lateral = v * halfW;
+      // 杯状弯曲 + 起伏：花瓣不是平板，中间拱起、边缘带一点波浪
+      let localZ = petal.z
+        + Math.sin(Math.PI * u) * petal.curl
+        + lateral * lateral * 0.28
+        + Math.sin(u * 5.0 + petal.wobble) * 0.07;
+      // 每瓣独立倾角：绕瓣长轴旋转一点，横向和深度互换一小部分
+      const cosT = Math.cos(petal.tilt), sinT = Math.sin(petal.tilt);
+      const lat2 = lateral * cosT - localZ * sinT * 0.4;
+      const z2 = lateral * sinT * 0.4 + localZ;
+      // 从瓣局部坐标转到整朵花的放射坐标
+      const cosA = Math.cos(petal.angle), sinA = Math.sin(petal.angle);
+      ox = cosA * radial - sinA * lat2;
+      oy = sinA * radial + cosA * lat2;
+      oz = z2;
+
+      // ---- 花苞：花瓣“折叠”，不是整体缩放，也不是竖直光柱 ----
+      // 折叠角随 u 增大：根部基本不动，尖部向前折约 66 度。
+      // 这样尖部径向缩短、向前探出、横向收窄，花瓣由平面变成包拢的杯状，
+      // 在正视图里仍是一个圆润的花苞盘面，而不是几条向下延伸的线。
+      const fold = u * 1.15;
+      const cosF = Math.cos(fold), sinF = Math.sin(fold);
+      const radialClosed = radial * cosF * 0.85 + 0.10;
+      const lateralClosed = lat2 * (0.30 + 0.70 * cosF);
+      const cxRaw = cosA * radialClosed - sinA * lateralClosed;
+      const cyRaw = sinA * radialClosed + cosA * lateralClosed;
+      // 花苞盘面略呈竖椭圆，像一颗含苞的蓓蕾，而不是正圆盘
+      cx = cxRaw * 0.85;
+      cy = cyRaw * 1.12 + 0.05;
+      cz = petal.z * 0.3 + radial * sinF * 0.50 + 0.20;
+
+      // ---- 颜色：瓣内渐变 + 边缘提亮 ----
+      const tt = u * u * (3 - 2 * u);
+      col = mixColor(petal.inner, petal.outer, tt);
+      // 越靠近边缘越向奶油白靠，轮廓柔和但不发虚
+      const edge = Math.abs(v);
+      col = mixColor(col, CREAM, edge * edge * 0.22);
+      // 中心线略亮，像花瓣受光的脊
+      col = mixColor(col, WARMWHITE, (1 - edge) * 0.08);
+      size = 0.9 + Math.random() * 0.7;
+      // 约 6% 是高光粒子：奶油白、稍大、更亮，点缀花瓣表面
+      if (Math.random() < 0.06) {
+        col = CREAM;
+        size = 1.4 + Math.random() * 0.8;
+        seed = 0.95 + Math.random() * 0.05;
+      }
     }
+
     closed[i * 3] = cx; closed[i * 3 + 1] = cy; closed[i * 3 + 2] = cz;
     open[i * 3] = ox; open[i * 3 + 1] = oy; open[i * 3 + 2] = oz;
     colors[i * 3] = col[0]; colors[i * 3 + 1] = col[1]; colors[i * 3 + 2] = col[2];
     sizes[i] = size;
-    seeds[i] = Math.random();
+    seeds[i] = seed;
   }
 
   const geo = new THREE.BufferGeometry();
@@ -188,6 +308,7 @@ function buildFlower(count) {
   flowerPoints.frustumCulled = false;
   flowerGroup.add(flowerPoints);
 }
+
 
 // ---------- 张开度 tension ----------
 // 手腕 0；指尖 8、12、16、20；指根关节 5、9、13、17
@@ -392,6 +513,9 @@ optDim.addEventListener('input', () => {
 });
 
 // ---------- 尺寸 ----------
+// 竖屏下花朵直径（约 6 个单位）会超出画面宽度，只剩中间一竖条，
+// 看起来就像几束光柱。所以按可视宽高算一个整体缩放，保证整朵花都在画面内。
+let fitScale = 1;
 function resize() {
   const w = window.innerWidth, h = window.innerHeight;
   renderer.setSize(w, h);
@@ -400,6 +524,9 @@ function resize() {
   skeletonCanvas.width = w;
   skeletonCanvas.height = h;
   flowerMaterial.uniforms.uPixelRatio.value = Math.min(window.devicePixelRatio || 1, 2);
+  const visibleHeight = 2 * Math.tan(THREE.MathUtils.degToRad(25)) * 7;
+  const visibleWidth = visibleHeight * camera.aspect;
+  fitScale = Math.max(0.35, Math.min(1, visibleWidth * 0.90 / 6.0, visibleHeight * 0.80 / 6.0));
 }
 window.addEventListener('resize', resize);
 
@@ -425,7 +552,7 @@ renderer.setAnimationLoop(() => {
   flowerGroup.rotation.y = flowerPos.x * 0.18;
   flowerGroup.rotation.x = -flowerPos.y * 0.12;
   const breathe = 1 + Math.sin(t * 1.2) * 0.02 + currentSpread * 0.05;
-  flowerGroup.scale.setScalar(breathe);
+  flowerGroup.scale.setScalar(breathe * fitScale);
   sway *= 0.92;
 
   flowerMaterial.uniforms.uSpread.value = currentSpread;
