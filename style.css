@@ -32,7 +32,30 @@ body {
   width: min(360px, calc(100vw - 24px));
   display: flex; flex-direction: column; gap: 10px;
   max-height: calc(100vh - 24px); overflow-y: auto;
+  /* 显示 / 隐藏只做透明度和位移过渡，不动粒子、摄像头和手势 */
+  transition: opacity 0.25s ease, transform 0.25s ease, visibility 0.25s;
 }
+/* 面板隐藏：整个控制面板（标题卡片 + 控制卡片）一起消失，
+   画布本身就是全屏的，所以花朵自然获得完整展示区域，不留空白 */
+.ui.panel-hidden {
+  opacity: 0;
+  transform: translateY(-10px);
+  visibility: hidden;
+  pointer-events: none;
+}
+/* 右下角悬浮切换按钮：始终固定，不随面板隐藏而消失 */
+.panel-toggle {
+  position: fixed; z-index: 10; right: 16px; bottom: 16px;
+  width: 56px; height: 56px; border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(255, 93, 143, 0.92); color: #fff;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+.panel-toggle:hover { background: rgba(179, 136, 255, 0.95); }
+.panel-toggle:active { transform: scale(0.94); }
+.panel-toggle-icon { font-size: 30px; line-height: 1; font-weight: 600; }
 .card {
   background: rgba(15, 8, 28, 0.62);
   border: 1px solid rgba(255, 255, 255, 0.16);

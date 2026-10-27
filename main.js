@@ -22,12 +22,17 @@ const optMirror = document.getElementById('opt-mirror');
 const optCount = document.getElementById('opt-count');
 const optDim = document.getElementById('opt-dim');
 const videoDimEl = document.getElementById('video-dim');
+const panelEl = document.querySelector('main.ui');
+const btnTogglePanel = document.getElementById('btn-toggle-panel');
 
 // ---------- 状态 ----------
 // tension：手掌张开度，0=握拳，1=全开；spread：绽放程度，0=花苞，1=全开
+// 逐层 spread：下标 0=花心内层，1=内圈，2=中圈，3=外圈，各层独立缓动
 let tensionSmooth = 0;
 let targetSpread = 0;
 let currentSpread = 0;
+let layerCurrents = [0, 0, 0, 0];
+let prevOverallSpread = 0;
 let demoMode = false;
 let demoStart = 0;
 let cameraOn = false;
@@ -57,7 +62,10 @@ const flowerMaterial = new THREE.ShaderMaterial({
   depthWrite: false,
   blending: THREE.AdditiveBlending,
   uniforms: {
-    uSpread: { value: 0 },
+    uSpread0: { value: 0 },
+    uSpread1: { value: 0 },
+    uSpread2: { value: 0 },
+    uSpread3: { value: 0 },
     uTime: { value: 0 },
     uPixelRatio: { value: Math.min(window.devicePixelRatio || 1, 2) },
     uSway: { value: 0 },
@@ -68,28 +76,35 @@ const flowerMaterial = new THREE.ShaderMaterial({
     attribute vec3 aColor;
     attribute float aSize;
     attribute float aSeed;
-    uniform float uSpread;
+    attribute float aLayer;
+    uniform float uSpread0;
+    uniform float uSpread1;
+    uniform float uSpread2;
+    uniform float uSpread3;
     uniform float uTime;
     uniform float uPixelRatio;
     uniform float uSway;
     varying vec3 vColor;
     varying float vAlpha;
     void main() {
-      // 核心插值：花苞位置 -> 绽放位置，全部在顶点着色器里做，保证性能
-      vec3 pos = mix(aClosed, aOpen, uSpread);
+      // 逐层插值：每颗粒子按自己的层级取对应的 spread，花苞位置 -> 绽放位置
+      // 全部在顶点着色器里做，保证性能；不是整朵花统一缩放。
+      float layerSpread = uSpread0;
+      if (aLayer > 0.5 && aLayer < 1.5) layerSpread = uSpread1;
+      else if (aLayer >= 1.5 && aLayer < 2.5) layerSpread = uSpread2;
+      else if (aLayer >= 2.5) layerSpread = uSpread3;
+      vec3 pos = mix(aClosed, aOpen, layerSpread);
       // 绽放后带一点呼吸和摆动，握拳时几乎不动
-      float flutter = sin(uTime * 2.0 + aSeed * 20.0) * 0.06 * uSpread;
+      float flutter = sin(uTime * 2.0 + aSeed * 20.0) * 0.06 * layerSpread;
       pos.x += flutter + sin(uTime * 1.3 + aSeed * 13.0) * uSway;
-      pos.y += cos(uTime * 1.7 + aSeed * 17.0) * 0.05 * uSpread;
+      pos.y += cos(uTime * 1.7 + aSeed * 17.0) * 0.05 * layerSpread;
       vColor = aColor;
       // 每个粒子透明度略有不同，避免成千上万个点叠加时全变成一片白
       vAlpha = 0.55 + 0.45 * aSeed;
       vec4 mv = modelViewMatrix * vec4(pos, 1.0);
       gl_Position = projectionMatrix * mv;
-      // 修复前这里是 260.0 / 距离：手机上单个点能到 200~300 像素，
-      // 12000 个点叠加后只能看到一个大白块。现在按 18.0 / 距离算，
       // 手机上单个点约 5~10 像素，花苞时再缩小 30%，才能看清单颗粒子。
-      gl_PointSize = aSize * uPixelRatio * (18.0 / -mv.z) * (0.7 + 0.3 * uSpread);
+      gl_PointSize = aSize * uPixelRatio * (18.0 / -mv.z) * (0.7 + 0.3 * layerSpread);
     }
   `,
   fragmentShader: `
@@ -116,72 +131,94 @@ const PINK = [1.0, 0.36, 0.56];
 const PURPLE = [0.70, 0.53, 1.0];
 const LIGHT = [1.0, 0.78, 0.87];
 
-// ---------- 生成粒子花朵（2026-10-28 重做版） ----------
-// 目标：第一眼就是一朵花，不是光柱、烟雾或喷泉。
-// 做法：用参数化三维花瓣曲面，在曲面内部采样粒子，而不是只画几条线。
+// ---------- 生成粒子花朵（2026-10-28 重瓣牡丹版） ----------
+// 目标：饱满的重瓣牡丹 / 重瓣山茶花，不是空心粒子球，也不是薄壳。
+// 结构：4 层，每层 12 片，共 48 片花瓣 + 花心。
+//   第 0 层 花心内层：最短、最密、最卷曲，长度 1.05，紧紧包围中心
+//   第 1 层 内圈：长度 1.75，朝向中心略弯，互相交叠成紧实内部
+//   第 2 层 中圈：长度 2.45，明显变宽变长，圆润扇形/椭圆形
+//   第 3 层 外圈：长度 3.05，最大最宽，向外舒展，边缘起伏卷曲
+// 每层有独立的半径、角度偏移、深度、宽度、长度、弯曲、颜色，
+// 相邻层角度错开、每片长度/宽度/倾角带随机扰动，避免排成机械圆环。
 //
-// 结构：3 层、共 12 片花瓣，呈放射状交错排列
-//   后层 5 片：最长、最宽、位置最靠后（z 负），颜色偏蓝紫/冰蓝
-//   中层 4 片：居中，颜色偏桃红/紫罗兰
-//   前层 3 片：最短、最靠前（z 正）、杯状弯曲最大，颜色偏玫红/樱花粉/奶油白
-// 每片花瓣是椭圆形/水滴形曲面：沿瓣方向 u（0=根部，1=尖部），
-// 横向半宽 halfW(u) = W * sin(pi * u^1.15)^0.8，根部收窄、中部最宽、尖部圆收。
-// 花瓣曲面还有杯状弯曲（z 随 u 拱起、横向二次弯曲）和每瓣独立的
-// 小倾角、起伏，让花瓣不在同一平面，有真实的前后纵深。
+// 花瓣几何：每片是独立的三维弯曲曲面，不是薄壳。
+//   沿瓣方向 u（0=根部，1=尖部），横向半宽 halfW(u) = W * sin(pi * u^1.10)^0.8，
+//   根部收窄、中部最宽、尖部圆收；横向采样 v' = sign(v)*v^2，中心密、边缘稀。
+//   曲面：中间隆起（sin(pi*u)*隆起）、横向二次杯状弯曲、每瓣倾角和起伏。
+//   厚度：在曲面法向（近似 z 向）上加 [-thickness, +thickness] 的随机偏移，
+//   让花瓣从侧面看也有体积，而不是一张薄网。
+//   穹顶：整朵花是半球形穹顶，中心向前凸、外缘向后收，
+//   每层的基础深度 + 尖部深度变化（内层尖部向前、外层尖部向后 droop）叠加而成。
 //
-// 花心：15% 的粒子。60% 构成金色球形花心，40% 是向外探出的花蕊点，
-// 颜色在明亮金黄与暖白之间过渡，盛开时在花瓣前方、花苞时被包在里面。
+// 花心饱满：不再是空心球。花心由三部分填满：
+//   (a) 金色/暖白球形花心核；(b) 花蕊探出点；(c) 第 0 层短小卷曲花瓣紧密包围。
+//   从花心向外到内圈、中圈、外圈是连续过渡，正面和斜侧面都不留黑色空洞。
 //
-// 颜色：每片花瓣有自己的“根部色 -> 尖部色”渐变，同一片内按 u 平滑过渡，
-// 边缘再向奶油白提亮一点，形成柔和轮廓。配色覆盖玫红、樱花粉、桃红、
-// 紫罗兰、淡紫、蓝紫、冰蓝、青色、奶油白和少量金色，不再只有粉+金。
-//
-// 密度：横向采样用带符号平方 v' = sign(v)*v^2，让粒子向花瓣中心线集中、
-// 边缘逐渐稀疏；u 接近均匀采样，保证整片花瓣都被填满，不是只有边缘。
+// 颜色（层级区分，但不靠颜色代替几何）：
+//   外层：玫红、桃粉、洋红、紫粉；中层：粉紫、蓝紫、樱花粉、淡紫；
+//   内层：明亮粉色、奶油白、少量金色；花心内层：亮粉、奶油白、金色花蕊。
+//   每片内部按 u 做根部->尖部渐变，边缘向奶油白提亮，中心线略亮。
 const ROSE = [0.93, 0.20, 0.45];
+const MAGENTA = [0.88, 0.18, 0.62];
 const CHERRY = [1.00, 0.55, 0.70];
 const PEACH = [1.00, 0.65, 0.55];
 const VIOLET = [0.62, 0.35, 0.95];
 const LILAC = [0.78, 0.62, 1.00];
 const BLUEPURPLE = [0.45, 0.40, 0.95];
 const ICEBLUE = [0.60, 0.85, 1.00];
-const CYAN = [0.40, 0.90, 0.90];
 const CREAM = [1.00, 0.97, 0.88];
 const WARMWHITE = [1.00, 0.98, 0.92];
 
-// 每层：片数、长度、宽度、深度、杯状弯曲、每片的渐变（根部->尖部）
+// 层定义：count、长度、宽度、基础深度、尖部深度变化、隆起、厚度、角度偏移
 const PETAL_LAYERS = [
   {
-    count: 5, length: 3.00, width: 0.98, z: -0.55, curl: 0.20, offset: 0,
+    layer: 0, count: 12, length: 1.05, width: 0.55, z: 0.85, tipZ: 0.35, bulge: 0.22, thickness: 0.07, offset: 0.00,
     gradients: [
-      [LILAC, BLUEPURPLE], [ICEBLUE, VIOLET], [LILAC, BLUEPURPLE],
-      [CYAN, BLUEPURPLE], [ICEBLUE, VIOLET],
+      [CREAM, CHERRY], [WARMWHITE, ROSE], [CREAM, PEACH], [GOLD, CHERRY],
+      [CREAM, ROSE], [WARMWHITE, CHERRY], [CREAM, PEACH], [GOLD, ROSE],
+      [CREAM, CHERRY], [WARMWHITE, PEACH], [CREAM, ROSE], [GOLD, CHERRY],
     ],
   },
   {
-    count: 4, length: 2.65, width: 0.90, z: -0.10, curl: 0.35, offset: 0.78,
+    layer: 1, count: 12, length: 1.75, width: 0.78, z: 0.55, tipZ: 0.22, bulge: 0.28, thickness: 0.09, offset: 0.26,
     gradients: [
-      [PEACH, VIOLET], [CHERRY, ROSE], [LILAC, VIOLET], [PEACH, CHERRY],
+      [CREAM, CHERRY], [PEACH, ROSE], [CREAM, MAGENTA], [WARMWHITE, CHERRY],
+      [PEACH, ROSE], [CREAM, CHERRY], [WARMWHITE, MAGENTA], [PEACH, CHERRY],
+      [CREAM, ROSE], [WARMWHITE, CHERRY], [PEACH, MAGENTA], [CREAM, CHERRY],
     ],
   },
   {
-    count: 3, length: 2.15, width: 0.82, z: 0.40, curl: 0.50, offset: 0.35,
+    layer: 2, count: 12, length: 2.45, width: 0.92, z: 0.15, tipZ: -0.08, bulge: 0.32, thickness: 0.11, offset: 0.52,
     gradients: [
-      [CREAM, ROSE], [CREAM, CHERRY], [PEACH, ROSE],
+      [LILAC, VIOLET], [CHERRY, BLUEPURPLE], [PEACH, VIOLET], [LILAC, CHERRY],
+      [ICEBLUE, VIOLET], [CHERRY, LILAC], [LILAC, BLUEPURPLE], [PEACH, VIOLET],
+      [CHERRY, VIOLET], [LILAC, CHERRY], [ICEBLUE, BLUEPURPLE], [PEACH, LILAC],
+    ],
+  },
+  {
+    layer: 3, count: 12, length: 3.05, width: 1.02, z: -0.35, tipZ: -0.48, bulge: 0.30, thickness: 0.13, offset: 0.13,
+    gradients: [
+      [PEACH, ROSE], [CHERRY, MAGENTA], [PEACH, MAGENTA], [CREAM, ROSE],
+      [CHERRY, ROSE], [PEACH, MAGENTA], [CREAM, MAGENTA], [CHERRY, ROSE],
+      [PEACH, ROSE], [CREAM, MAGENTA], [CHERRY, MAGENTA], [PEACH, ROSE],
     ],
   },
 ];
-// 展平成一片花瓣的清单，带每瓣的倾角（绕瓣长轴的小旋转）和起伏相位
 const PETALS = [];
 for (const layer of PETAL_LAYERS) {
   for (let k = 0; k < layer.count; k++) {
+    // 每片独立扰动：长度/宽度 ±12%，角度在步长内错开，避免机械圆环
+    const step = (Math.PI * 2) / layer.count;
     PETALS.push({
-      length: layer.length,
-      width: layer.width,
+      layer: layer.layer,
+      length: layer.length * (0.88 + Math.random() * 0.24),
+      width: layer.width * (0.88 + Math.random() * 0.24),
       z: layer.z,
-      curl: layer.curl,
-      angle: layer.offset + (k / layer.count) * Math.PI * 2,
-      tilt: (Math.random() - 0.5) * 0.30,
+      tipZ: layer.tipZ,
+      bulge: layer.bulge,
+      thickness: layer.thickness,
+      angle: layer.offset + k * step + (Math.random() - 0.5) * step * 0.55,
+      tilt: (Math.random() - 0.5) * 0.34,
       wobble: Math.random() * Math.PI * 2,
       inner: layer.gradients[k % layer.gradients.length][0],
       outer: layer.gradients[k % layer.gradients.length][1],
@@ -209,80 +246,79 @@ function buildFlower(count) {
   const colors = new Float32Array(count * 3);
   const sizes = new Float32Array(count);
   const seeds = new Float32Array(count);
+  const layers = new Float32Array(count);
 
   for (let i = 0; i < count; i++) {
     const r = Math.random();
-    let cx, cy, cz, ox, oy, oz, col, size, seed;
+    let cx, cy, cz, ox, oy, oz, col, size, seed, layerIndex;
     seed = Math.random();
 
-    if (r < 0.15) {
-      // ---- 花心 / 花蕊 ----
-      const isStamen = Math.random() < 0.40;
+    if (r < 0.14) {
+      // ---- 花心核 + 花蕊：实心填满，不留空洞 ----
+      layerIndex = 0;
+      const isStamen = Math.random() < 0.38;
       const th = Math.random() * Math.PI * 2;
       const ph = Math.acos(2 * Math.random() - 1);
+      // 球体内部均匀采样（半径开立方），不是只在球壳上
       const rr = isStamen
-        ? 0.42 + Math.random() * 0.28
-        : 0.42 * Math.cbrt(Math.random());
+        ? 0.45 + Math.random() * 0.30
+        : 0.50 * Math.cbrt(Math.random());
       ox = Math.sin(ph) * Math.cos(th) * rr;
       oy = Math.sin(ph) * Math.sin(th) * rr;
-      oz = 0.35 + Math.cos(ph) * rr * 0.6;
-      // 花苞时花心收得更小、藏得更靠后，让折叠的花瓣包住它
-      cx = ox * 0.65;
-      cy = oy * 0.65;
-      cz = 0.15;
+      oz = 0.55 + Math.cos(ph) * rr * 0.7;
+      cx = ox * 0.70;
+      cy = oy * 0.70;
+      cz = 0.35;
       const t = Math.random();
       col = mixColor(GOLD, WARMWHITE, t);
-      if (isStamen && Math.random() < 0.25) col = WARMWHITE; // 花蕊尖端亮点
+      if (isStamen && Math.random() < 0.30) col = WARMWHITE;
       size = isStamen ? 0.7 + Math.random() * 0.5 : 0.9 + Math.random() * 0.6;
     } else {
-      // ---- 花瓣：在曲面内部采样 ----
+      // ---- 花瓣：在三维弯曲曲面内部 + 厚度体积内采样 ----
       const petal = pickPetal();
-      const u = Math.pow(Math.random(), 0.90); // 沿瓣方向，接近均匀，整片填满
+      layerIndex = petal.layer;
+      const u = Math.pow(Math.random(), 0.92);
       const vRaw = Math.random() * 2 - 1;
-      const v = Math.sign(vRaw) * vRaw * vRaw; // 向中心线集中，边缘稀疏
-      const halfW = petal.width * Math.pow(Math.sin(Math.PI * Math.pow(u, 1.15)), 0.8);
+      const v = Math.sign(vRaw) * vRaw * vRaw;
+      const halfW = petal.width * Math.pow(Math.sin(Math.PI * Math.pow(u, 1.10)), 0.8);
       const radial = u * petal.length;
       const lateral = v * halfW;
-      // 杯状弯曲 + 起伏：花瓣不是平板，中间拱起、边缘带一点波浪
+      // 曲面：基础深度 + 尖部深度变化 + 中间隆起 + 横向杯状弯曲 + 起伏
       let localZ = petal.z
-        + Math.sin(Math.PI * u) * petal.curl
-        + lateral * lateral * 0.28
+        + u * petal.tipZ
+        + Math.sin(Math.PI * u) * petal.bulge
+        + lateral * lateral * 0.22
         + Math.sin(u * 5.0 + petal.wobble) * 0.07;
-      // 每瓣独立倾角：绕瓣长轴旋转一点，横向和深度互换一小部分
+      // 厚度：沿法向（近似 z 向）随机偏移，让花瓣有体积感
+      localZ += (Math.random() * 2 - 1) * petal.thickness;
       const cosT = Math.cos(petal.tilt), sinT = Math.sin(petal.tilt);
-      const lat2 = lateral * cosT - localZ * sinT * 0.4;
-      const z2 = lateral * sinT * 0.4 + localZ;
-      // 从瓣局部坐标转到整朵花的放射坐标
+      const lat2 = lateral * cosT - localZ * sinT * 0.35;
+      const z2 = lateral * sinT * 0.35 + localZ;
       const cosA = Math.cos(petal.angle), sinA = Math.sin(petal.angle);
       ox = cosA * radial - sinA * lat2;
       oy = sinA * radial + cosA * lat2;
       oz = z2;
 
-      // ---- 花苞：花瓣“折叠”，不是整体缩放，也不是竖直光柱 ----
-      // 折叠角随 u 增大：根部基本不动，尖部向前折约 66 度。
-      // 这样尖部径向缩短、向前探出、横向收窄，花瓣由平面变成包拢的杯状，
-      // 在正视图里仍是一个圆润的花苞盘面，而不是几条向下延伸的线。
-      const fold = u * 1.15;
+      // ---- 花苞：花瓣折叠收拢（逐层参数在着色器外由层级 spread 控制） ----
+      // 折叠角随 u 增大：根部基本不动，尖部向前折；内层折得更紧、外层折得更开，
+      // 这样花苞仍是圆润饱满的盘面，而不是竖线或整体缩放。
+      const foldBase = 1.05 - petal.layer * 0.12; // 内层约 60 度，外层约 42 度
+      const fold = u * foldBase;
       const cosF = Math.cos(fold), sinF = Math.sin(fold);
-      const radialClosed = radial * cosF * 0.85 + 0.10;
-      const lateralClosed = lat2 * (0.30 + 0.70 * cosF);
+      const radialClosed = radial * cosF * 0.80 + 0.12;
+      const lateralClosed = lat2 * (0.35 + 0.65 * cosF);
       const cxRaw = cosA * radialClosed - sinA * lateralClosed;
       const cyRaw = sinA * radialClosed + cosA * lateralClosed;
-      // 花苞盘面略呈竖椭圆，像一颗含苞的蓓蕾，而不是正圆盘
-      cx = cxRaw * 0.85;
-      cy = cyRaw * 1.12 + 0.05;
-      cz = petal.z * 0.3 + radial * sinF * 0.50 + 0.20;
+      cx = cxRaw * 0.88;
+      cy = cyRaw * 1.10 + 0.05;
+      cz = petal.z * 0.3 + radial * sinF * 0.45 + 0.25;
 
-      // ---- 颜色：瓣内渐变 + 边缘提亮 ----
       const tt = u * u * (3 - 2 * u);
       col = mixColor(petal.inner, petal.outer, tt);
-      // 越靠近边缘越向奶油白靠，轮廓柔和但不发虚
       const edge = Math.abs(v);
-      col = mixColor(col, CREAM, edge * edge * 0.22);
-      // 中心线略亮，像花瓣受光的脊
-      col = mixColor(col, WARMWHITE, (1 - edge) * 0.08);
+      col = mixColor(col, CREAM, edge * edge * 0.20);
+      col = mixColor(col, WARMWHITE, (1 - edge) * 0.07);
       size = 0.9 + Math.random() * 0.7;
-      // 约 6% 是高光粒子：奶油白、稍大、更亮，点缀花瓣表面
       if (Math.random() < 0.06) {
         col = CREAM;
         size = 1.4 + Math.random() * 0.8;
@@ -295,6 +331,7 @@ function buildFlower(count) {
     colors[i * 3] = col[0]; colors[i * 3 + 1] = col[1]; colors[i * 3 + 2] = col[2];
     sizes[i] = size;
     seeds[i] = seed;
+    layers[i] = layerIndex;
   }
 
   const geo = new THREE.BufferGeometry();
@@ -304,6 +341,7 @@ function buildFlower(count) {
   geo.setAttribute('aColor', new THREE.BufferAttribute(colors, 3));
   geo.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
   geo.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1));
+  geo.setAttribute('aLayer', new THREE.BufferAttribute(layers, 1));
   flowerPoints = new THREE.Points(geo, flowerMaterial);
   flowerPoints.frustumCulled = false;
   flowerGroup.add(flowerPoints);
@@ -497,6 +535,23 @@ function setDemo(on) {
 btnCamera.addEventListener('click', startCamera);
 btnRetry.addEventListener('click', startCamera);
 btnDemo.addEventListener('click', () => setDemo(!demoMode));
+// ---------- 控制面板显示 / 隐藏 ----------
+// 只改界面显示：不重置粒子、不关摄像头、不停手势、不改任何参数。
+// 默认显示；按钮在面板之外、固定右下角，隐藏后也不会消失。
+let panelVisible = true;
+function setPanelVisible(visible) {
+  panelVisible = visible;
+  if (panelEl) panelEl.classList.toggle('panel-hidden', !visible);
+  if (btnTogglePanel) {
+    const icon = btnTogglePanel.querySelector('.panel-toggle-icon');
+    if (icon) icon.textContent = visible ? '‹' : '☰';
+    btnTogglePanel.setAttribute('aria-label', visible ? '隐藏控制面板' : '显示控制面板');
+    btnTogglePanel.title = visible ? '隐藏控制面板' : '显示控制面板';
+  }
+}
+if (btnTogglePanel) {
+  btnTogglePanel.addEventListener('click', () => setPanelVisible(!panelVisible));
+}
 optSkeleton.addEventListener('change', () => {
   if (!optSkeleton.checked) skeletonCtx.clearRect(0, 0, skeletonCanvas.width, skeletonCanvas.height);
 });
@@ -543,8 +598,26 @@ renderer.setAnimationLoop(() => {
     targetSpread = tensionToSpread(tensionSmooth);
     flowerTarget.set(Math.sin(t * 0.5) * 0.8, Math.cos(t * 0.4) * 0.5, 0);
   }
-  // 需求里的缓动公式：每帧向目标靠近 10%
-  currentSpread += (targetSpread - currentSpread) * 0.1;
+  // 逐层绽放 / 收拢：整体进度 targetSpread 先映射到每层的窗口，
+  // 再按方向给不同的缓动速率，避免所有花瓣同时缩放。
+  // 窗口（整体进度 p 从 0 到 1）：
+  //   花心内层 0.00~0.55，内圈 0.15~0.70，中圈 0.35~0.85，外圈 0.55~1.00
+  // 张开时：花心先松开，内圈、中圈、外圈依次展开；
+  // 握拳时 p 下降，同一窗口自然反向：外圈先合拢，花心最后保持紧凑。
+  // 速率再按方向区分：张开时内层快、外层慢；收拢时外层快、内层慢，
+  // 这样手势快速变化时顺序仍然成立，且每层都是平滑跟随、不跳变。
+  const layerWindows = [[0.00, 0.55], [0.15, 0.70], [0.35, 0.85], [0.55, 1.00]];
+  const opening = targetSpread >= prevOverallSpread;
+  const rates = opening ? [0.16, 0.13, 0.10, 0.07] : [0.07, 0.10, 0.13, 0.16];
+  for (let li = 0; li < 4; li++) {
+    const [w0, w1] = layerWindows[li];
+    const x = Math.min(1, Math.max(0, (targetSpread - w0) / (w1 - w0)));
+    const layerTarget = x * x * (3 - 2 * x);
+    layerCurrents[li] += (layerTarget - layerCurrents[li]) * rates[li];
+  }
+  prevOverallSpread = targetSpread;
+  // 界面上的 spread 显示用四层平均，仍保留整体缓动的直观读数
+  currentSpread = (layerCurrents[0] + layerCurrents[1] + layerCurrents[2] + layerCurrents[3]) / 4;
   // 花朵位置轻微跟随，同样做平滑，避免抖动
   flowerPos.lerp(flowerTarget, 0.08);
   flowerGroup.position.copy(flowerPos);
@@ -555,7 +628,10 @@ renderer.setAnimationLoop(() => {
   flowerGroup.scale.setScalar(breathe * fitScale);
   sway *= 0.92;
 
-  flowerMaterial.uniforms.uSpread.value = currentSpread;
+  flowerMaterial.uniforms.uSpread0.value = layerCurrents[0];
+  flowerMaterial.uniforms.uSpread1.value = layerCurrents[1];
+  flowerMaterial.uniforms.uSpread2.value = layerCurrents[2];
+  flowerMaterial.uniforms.uSpread3.value = layerCurrents[3];
   flowerMaterial.uniforms.uTime.value = t;
   flowerMaterial.uniforms.uSway.value = sway;
 
