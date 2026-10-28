@@ -211,8 +211,10 @@ for (const layer of PETAL_LAYERS) {
     const step = (Math.PI * 2) / layer.count;
     PETALS.push({
       layer: layer.layer,
-      length: layer.length * (0.88 + Math.random() * 0.24),
-      width: layer.width * (0.88 + Math.random() * 0.24),
+      length: layer.length * (0.85 + Math.random() * 0.30),
+      width: layer.width * (0.85 + Math.random() * 0.30),
+      // 每片独立亮度：相邻花瓣亮度差 0.85~1.07，靠亮度差也能分清分界
+      brightness: 0.85 + Math.random() * 0.22,
       z: layer.z,
       tipZ: layer.tipZ,
       bulge: layer.bulge,
@@ -274,15 +276,63 @@ function buildFlower(count) {
       if (isStamen && Math.random() < 0.30) col = WARMWHITE;
       size = isStamen ? 0.7 + Math.random() * 0.5 : 0.9 + Math.random() * 0.6;
     } else {
-      // ---- 花瓣：在三维弯曲曲面内部 + 厚度体积内采样 ----
+      // ---- 花瓣：单片独立采样，边缘密集、内部稀疏 ----
+      // 关键：这不是只调透明度，而是真正的采样概率/空间分布。
+      //   边缘组（约 55%）：粒子沿单片花瓣的轮廓带采样——
+      //     70% 沿两侧边缘：u 均匀，横向在轮廓内侧按指数分布向内散开，
+      //       平均向内约 0.16 个单位，带宽很窄，所以单位面积密度很高；
+      //     20% 沿尖部弧线：u 在 0.90~1.00，横向铺满尖部；
+      //     10% 沿根部：u 在 0~0.10，与花心衔接；
+      //     另有约 12% 的侧缘粒子允许向外散逸最多 0.07，形成轻盈感，但不破坏轮廓。
+      //   内部组（约 45%）：u、横向都均匀采样在 0.08~0.92、-0.85~0.85 范围内，
+      //     不再向中心线集中，所以内部单位面积密度明显低于边缘带，
+      //     但仍有粒子填满整片，不会变成空心的轮廓线。
+      // 边缘距离：sideDist = 到侧缘的横向距离，tipDist = 到尖部的纵向距离，
+      //   baseDist = 到根部的纵向距离，edgeDist = 三者最小值（世界单位）。
+      //   亮度和大小也随 edgeDist 变化：越靠近边缘越亮、稍大，内部较暗、较小，
+      //   但这只是对采样密度的加强，不是代替采样密度。
       const petal = pickPetal();
       layerIndex = petal.layer;
-      const u = Math.pow(Math.random(), 0.92);
-      const vRaw = Math.random() * 2 - 1;
-      const v = Math.sign(vRaw) * vRaw * vRaw;
-      const halfW = petal.width * Math.pow(Math.sin(Math.PI * Math.pow(u, 1.10)), 0.8);
+      const isEdge = Math.random() < 0.55;
+      let u, lateral, halfW, edgeDist;
+      const halfWAt = (uu) => petal.width * Math.pow(Math.sin(Math.PI * Math.pow(uu, 1.10)), 0.8);
+      if (isEdge) {
+        const seg = Math.random();
+        if (seg < 0.70) {
+          u = 0.08 + Math.random() * 0.84;
+          halfW = halfWAt(u);
+          const side = Math.random() < 0.5 ? -1 : 1;
+          if (Math.random() < 0.12) {
+            lateral = side * (halfW + Math.random() * 0.07); // 少量向外散逸
+            edgeDist = 0;
+          } else {
+            const inward = -Math.log(1 - Math.random() * 0.95) * 0.16;
+            lateral = side * Math.max(0, halfW - inward);
+            edgeDist = Math.min(inward, halfW);
+          }
+        } else if (seg < 0.90) {
+          u = 0.90 + Math.random() * 0.10;
+          halfW = halfWAt(u);
+          const vv = Math.random() * 2 - 1;
+          lateral = vv * halfW * (0.90 + Math.random() * 0.15);
+          edgeDist = Math.min((1 - u) * petal.length, (1 - Math.abs(vv)) * halfW);
+        } else {
+          u = Math.random() * 0.10;
+          halfW = halfWAt(u);
+          const vv = Math.random() * 2 - 1;
+          lateral = vv * halfW;
+          edgeDist = Math.min(u * petal.length, (1 - Math.abs(vv)) * halfW);
+        }
+      } else {
+        u = 0.08 + Math.random() * 0.84;
+        halfW = halfWAt(u);
+        const vv = (Math.random() * 2 - 1) * 0.85;
+        lateral = vv * halfW;
+        edgeDist = Math.min((1 - Math.abs(vv)) * halfW, u * petal.length, (1 - u) * petal.length);
+      }
+      // 下面 open/closed 都用同一组 (u, lateral)，边缘和内部粒子都附着在
+      // 各自花瓣的局部坐标上，随花瓣折叠一起变形，不会脱离花瓣。
       const radial = u * petal.length;
-      const lateral = v * halfW;
       // 曲面：基础深度 + 尖部深度变化 + 中间隆起 + 横向杯状弯曲 + 起伏
       let localZ = petal.z
         + u * petal.tipZ
@@ -315,11 +365,22 @@ function buildFlower(count) {
 
       const tt = u * u * (3 - 2 * u);
       col = mixColor(petal.inner, petal.outer, tt);
-      const edge = Math.abs(v);
-      col = mixColor(col, CREAM, edge * edge * 0.20);
-      col = mixColor(col, WARMWHITE, (1 - edge) * 0.07);
-      size = 0.9 + Math.random() * 0.7;
-      if (Math.random() < 0.06) {
+      // 亮度梯度：edgeDist 越小（越靠近轮廓）越亮；内部较暗、较小。
+      // 这只是加强，不是代替采样密度——密度差已经由上面的边缘/内部分组决定。
+      // edgeDist 0~0.35 个单位内从亮到暗平滑过渡，超过 0.35 按内部处理。
+      const edgeBright = Math.max(0, 1 - edgeDist / 0.35);
+      col = mixColor(col, CREAM, edgeBright * 0.28);
+      col = mixColor(col, WARMWHITE, edgeBright * 0.10);
+      // 每片独立亮度，让相邻花瓣即使颜色相近也能靠亮度分清
+      col = [col[0] * petal.brightness, col[1] * petal.brightness, col[2] * petal.brightness];
+      if (isEdge) {
+        size = 1.10 + Math.random() * 0.50;
+        seed = 0.85 + Math.random() * 0.15; // 边缘粒子在着色器里透明度更高
+      } else {
+        size = 0.80 + Math.random() * 0.35;
+        seed = 0.30 + Math.random() * 0.40; // 内部粒子较细、较淡，但数量仍在
+      }
+      if (Math.random() < 0.05) {
         col = CREAM;
         size = 1.4 + Math.random() * 0.8;
         seed = 0.95 + Math.random() * 0.05;
