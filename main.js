@@ -25,6 +25,7 @@ const optWidth = document.getElementById('opt-width');
 const optEdge = document.getElementById('opt-edge');
 const optWidthValue = document.getElementById('opt-width-value');
 const optEdgeValue = document.getElementById('opt-edge-value');
+const optLockFull = document.getElementById('opt-lock-full');
 const videoDimEl = document.getElementById('video-dim');
 const panelEl = document.querySelector('main.ui');
 const btnTogglePanel = document.getElementById('btn-toggle-panel');
@@ -40,6 +41,8 @@ let prevOverallSpread = 0;
 // 调试滑块：花瓣宽度系数（默认 1.0）、边缘粒子占比（默认 0.65），改动时重建花朵
 let petalWidthCoeff = 1.0;
 let edgeRatio = 0.65;
+// 调试开关：固定全开，勾选后 spread 锁 1，不改手势、演示、摄像头本身
+let lockFull = false;
 let demoMode = false;
 let demoStart = 0;
 let cameraOn = false;
@@ -685,6 +688,12 @@ if (optEdge) {
   });
   optEdge.addEventListener('change', () => buildFlower(parseInt(optCount.value, 10)));
 }
+// 固定全开：只改目标 spread，不重建花朵、不重置手势、演示和摄像头。
+if (optLockFull) {
+  optLockFull.addEventListener('change', () => {
+    lockFull = optLockFull.checked;
+  });
+}
 
 // ---------- 尺寸 ----------
 // 竖屏下花朵直径（约 6 个单位）会超出画面宽度，只剩中间一竖条，
@@ -719,6 +728,9 @@ renderer.setAnimationLoop(() => {
     targetSpread = tensionToSpread(tensionSmooth);
     flowerTarget.set(Math.sin(t * 0.5) * 0.8, Math.cos(t * 0.4) * 0.5, 0);
   }
+  // 固定全开调试：勾选时目标 spread 强制为 1，覆盖演示和手势的目标，
+  // 各层按原窗口和速率向 1 靠拢，松开后立即恢复正常目标，不用重建。
+  if (lockFull) targetSpread = 1;
   // 逐层绽放 / 收拢：整体进度 targetSpread 先映射到每层的窗口，
   // 再按方向给不同的缓动速率，避免所有花瓣同时缩放。
   // 窗口刻意拉开、重叠只留一小段（上一轮窗口重叠太多，实测看起来像整体同步）：
@@ -762,7 +774,8 @@ renderer.setAnimationLoop(() => {
   spreadValueEl.textContent = currentSpread.toFixed(2);
   tensionBarEl.style.width = (tensionSmooth * 100) + '%';
   spreadBarEl.style.width = (currentSpread * 100) + '%';
-  flowerStateEl.textContent = flowerStateText(tensionSmooth);
+  // 固定全开时状态按 spread 说，避免 tension 还在正弦变化时显示成花苞、和 spread 1.00 矛盾。
+  flowerStateEl.textContent = lockFull ? '现在是：绽放（固定全开）' : flowerStateText(tensionSmooth);
 
   renderer.render(scene, camera);
 });
