@@ -654,22 +654,24 @@ resize();
 renderer.setAnimationLoop(() => {
   const t = clock.getElapsedTime();
   if (demoMode) {
-    // 演示：张开度在 0~1 之间缓慢正弦变化，花朵位置也轻轻画圈
-    tensionSmooth = Math.sin(t * 0.6) * 0.5 + 0.5;
+    // 演示：张开度在 0~1 之间缓慢正弦变化，花朵位置也轻轻画圈。
+    // 上一轮演示周期太快（过渡约 5 秒），逐层顺序看不出来，这里放慢到约 14 秒一轮，
+    // 让内层到外层的依次展开有时间被眼睛跟上。
+    tensionSmooth = Math.sin(t * 0.45) * 0.5 + 0.5;
     targetSpread = tensionToSpread(tensionSmooth);
     flowerTarget.set(Math.sin(t * 0.5) * 0.8, Math.cos(t * 0.4) * 0.5, 0);
   }
   // 逐层绽放 / 收拢：整体进度 targetSpread 先映射到每层的窗口，
   // 再按方向给不同的缓动速率，避免所有花瓣同时缩放。
-  // 窗口（整体进度 p 从 0 到 1）：
-  //   花心内层 0.00~0.55，内圈 0.15~0.70，中圈 0.35~0.85，外圈 0.55~1.00
+  // 窗口刻意拉开、重叠只留一小段（上一轮窗口重叠太多，实测看起来像整体同步）：
+  //   花心内层 0.00~0.40，内圈 0.20~0.60，中圈 0.45~0.80，外圈 0.70~1.00
   // 张开时：花心先松开，内圈、中圈、外圈依次展开；
   // 握拳时 p 下降，同一窗口自然反向：外圈先合拢，花心最后保持紧凑。
   // 速率再按方向区分：张开时内层快、外层慢；收拢时外层快、内层慢，
   // 这样手势快速变化时顺序仍然成立，且每层都是平滑跟随、不跳变。
-  const layerWindows = [[0.00, 0.55], [0.15, 0.70], [0.35, 0.85], [0.55, 1.00]];
+  const layerWindows = [[0.00, 0.40], [0.20, 0.60], [0.45, 0.80], [0.70, 1.00]];
   const opening = targetSpread >= prevOverallSpread;
-  const rates = opening ? [0.16, 0.13, 0.10, 0.07] : [0.07, 0.10, 0.13, 0.16];
+  const rates = opening ? [0.20, 0.15, 0.10, 0.05] : [0.05, 0.10, 0.15, 0.20];
   for (let li = 0; li < 4; li++) {
     const [w0, w1] = layerWindows[li];
     const x = Math.min(1, Math.max(0, (targetSpread - w0) / (w1 - w0)));
@@ -683,8 +685,10 @@ renderer.setAnimationLoop(() => {
   flowerPos.lerp(flowerTarget, 0.08);
   flowerGroup.position.copy(flowerPos);
   flowerGroup.rotation.z = Math.sin(t * 0.3) * 0.05;
-  flowerGroup.rotation.y = flowerPos.x * 0.18;
-  flowerGroup.rotation.x = -flowerPos.y * 0.12;
+  // 轻微的持续摆动：让固定俯视也能偶尔看到侧面，穹顶和厚度才看得出来，
+  // 幅度只有约 10 度，不会把花转歪。
+  flowerGroup.rotation.y = flowerPos.x * 0.18 + Math.sin(t * 0.25) * 0.18;
+  flowerGroup.rotation.x = -flowerPos.y * 0.12 + Math.cos(t * 0.20) * 0.12;
   const breathe = 1 + Math.sin(t * 1.2) * 0.02 + currentSpread * 0.05;
   flowerGroup.scale.setScalar(breathe * fitScale);
   sway *= 0.92;

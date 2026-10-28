@@ -45,7 +45,7 @@ body {
 }
 /* 右下角悬浮切换按钮：始终固定，不随面板隐藏而消失 */
 .panel-toggle {
-  position: fixed; z-index: 10; right: 16px; bottom: 16px;
+  position: fixed; z-index: 9999; right: 16px; bottom: 16px;
   width: 56px; height: 56px; border-radius: 50%;
   border: 1px solid rgba(255, 255, 255, 0.35);
   background: rgba(255, 93, 143, 0.92); color: #fff;
