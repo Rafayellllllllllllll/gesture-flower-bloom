@@ -49,6 +49,9 @@ let cameraOn = false;
 let lastHandTime = 0;
 let sending = false;
 let hands = null;
+// 摄像头恢复用：当前流、识别循环是否已在跑，避免重复点“开启摄像头”产生两个流、两个循环互相抢。
+let currentStream = null;
+let cameraLoopStarted = false;
 let sway = 0;
 let lastPalm = null;
 
@@ -578,6 +581,27 @@ async function startCamera() {
     showError('手部识别库没有加载成功（可能是网络问题）：请检查网络后刷新页面，或先用“演示模式”看效果。');
     return;
   }
+  // 已经开着就不要再申请一次新流：安卓上第二次 getUserMedia 很容易被旧流自己占住而失败，
+  // 失败后又不报错、只剩“未检测到手”，这就是“第一次可以、后面不行”最常见的一种。
+  // 已经开着时只做恢复播放和补启动循环。
+  if (cameraOn && currentStream && videoEl.srcObject) {
+    try { await videoEl.play(); } catch (_) { /* 播放失败走下面提示 */ }
+    if (!videoEl.paused) {
+      // 演示开着时手部结果会被演示的目标覆盖，花看起来像“识别不上”：开摄像头就默认关演示。
+      if (demoMode) setDemo(false);
+      statusEl.textContent = '摄像头已开启，正在识别手部…';
+      statusEl.className = 'pill ok';
+      startCameraLoop();
+      return;
+    }
+  }
+  // 旧流先停掉再申请新流，避免旧流占着摄像头导致新流 NotReadableError。
+  if (currentStream) {
+    currentStream.getTracks().forEach((track) => { try { track.stop(); } catch (_) {} });
+    currentStream = null;
+  }
+  cameraOn = false;
+  cameraLoopStarted = false;
   statusEl.textContent = '正在请求摄像头权限…';
   statusEl.className = 'pill warn';
   try {
@@ -592,29 +616,63 @@ async function startCamera() {
       video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
       audio: false,
     });
+    currentStream = stream;
+    // 流一旦被系统、切后台或其他应用中断，之前是静默失效：只剩“未检测到手”，没有任何提示。
+    // 现在监听轨道结束，明确告诉用户画面中断了、点“重新尝试”才能恢复。
+    const videoTrack = stream.getVideoTracks()[0];
+    if (videoTrack) {
+      videoTrack.addEventListener('ended', () => {
+        cameraOn = false;
+        cameraLoopStarted = false;
+        currentStream = null;
+        statusEl.textContent = '摄像头画面中断了';
+        statusEl.className = 'pill warn';
+        btnCamera.textContent = '开启摄像头';
+        showError('摄像头画面中断了（可能是切后台、锁屏或被其他应用抢占）：请点“重新尝试”重新开启摄像头。');
+      });
+    }
     videoEl.srcObject = stream;
     await videoEl.play();
     cameraOn = true;
+    // 演示开着时手部结果会被演示的目标覆盖，花看起来像“识别不上”：开摄像头就默认关演示。
+    if (demoMode) setDemo(false);
     statusEl.textContent = '摄像头已开启，正在识别手部…';
     statusEl.className = 'pill ok';
     btnCamera.textContent = '摄像头已开启';
-    // 自己驱动识别循环：视频有新帧就送一帧，送完再送下一帧
-    const loop = async () => {
-      if (!cameraOn) return;
-      if (!sending && videoEl.readyState >= 2) {
-        sending = true;
-        try { await hands.send({ image: videoEl }); } catch (_) { /* 单帧失败不中断 */ }
-        sending = false;
-      }
-      requestAnimationFrame(loop);
-    };
-    requestAnimationFrame(loop);
+    startCameraLoop();
   } catch (e) {
+    cameraOn = false;
+    cameraLoopStarted = false;
+    currentStream = null;
     statusEl.textContent = '摄像头未开启';
     statusEl.className = 'pill warn';
     showError(cameraErrorMessage(e));
   }
 }
+
+// 识别循环只启动一份：重复启动会在 sending 标志上互相抢，导致送帧时断时续。
+function startCameraLoop() {
+  if (cameraLoopStarted) return;
+  cameraLoopStarted = true;
+  const loop = async () => {
+    if (!cameraOn) { cameraLoopStarted = false; return; }
+    if (!sending && videoEl.readyState >= 2 && !videoEl.paused) {
+      sending = true;
+      try { await hands.send({ image: videoEl }); } catch (_) { /* 单帧失败不中断 */ }
+      sending = false;
+    }
+    requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
+}
+
+// 切回前台时视频常被浏览器暂停，之前循环会一直跳过送帧、只剩“未检测到手”。
+// 回到前台且摄像头本应开着时，尝试恢复播放。
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && cameraOn && currentStream && videoEl.paused) {
+    videoEl.play().catch(() => {});
+  }
+});
 
 // ---------- 演示模式 ----------
 function setDemo(on) {
