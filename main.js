@@ -21,6 +21,10 @@ const optVideo = document.getElementById('opt-video');
 const optMirror = document.getElementById('opt-mirror');
 const optCount = document.getElementById('opt-count');
 const optDim = document.getElementById('opt-dim');
+const optWidth = document.getElementById('opt-width');
+const optEdge = document.getElementById('opt-edge');
+const optWidthValue = document.getElementById('opt-width-value');
+const optEdgeValue = document.getElementById('opt-edge-value');
 const videoDimEl = document.getElementById('video-dim');
 const panelEl = document.querySelector('main.ui');
 const btnTogglePanel = document.getElementById('btn-toggle-panel');
@@ -33,6 +37,9 @@ let targetSpread = 0;
 let currentSpread = 0;
 let layerCurrents = [0, 0, 0, 0];
 let prevOverallSpread = 0;
+// 调试滑块：花瓣宽度系数（默认 1.0）、边缘粒子占比（默认 0.65），改动时重建花朵
+let petalWidthCoeff = 1.0;
+let edgeRatio = 0.65;
 let demoMode = false;
 let demoStart = 0;
 let cameraOn = false;
@@ -60,7 +67,7 @@ scene.add(flowerGroup);
 const flowerMaterial = new THREE.ShaderMaterial({
   transparent: true,
   depthWrite: false,
-  blending: THREE.AdditiveBlending,
+  blending: THREE.NormalBlending,
   uniforms: {
     uSpread0: { value: 0 },
     uSpread1: { value: 0 },
@@ -77,6 +84,7 @@ const flowerMaterial = new THREE.ShaderMaterial({
     attribute float aSize;
     attribute float aSeed;
     attribute float aLayer;
+    attribute float aPetalPhase;
     uniform float uSpread0;
     uniform float uSpread1;
     uniform float uSpread2;
@@ -94,13 +102,14 @@ const flowerMaterial = new THREE.ShaderMaterial({
       else if (aLayer >= 1.5 && aLayer < 2.5) layerSpread = uSpread2;
       else if (aLayer >= 2.5) layerSpread = uSpread3;
       vec3 pos = mix(aClosed, aOpen, layerSpread);
-      // 绽放后带一点呼吸和摆动，握拳时几乎不动
-      float flutter = sin(uTime * 2.0 + aSeed * 20.0) * 0.06 * layerSpread;
-      pos.x += flutter + sin(uTime * 1.3 + aSeed * 13.0) * uSway;
-      pos.y += cos(uTime * 1.7 + aSeed * 17.0) * 0.05 * layerSpread;
+      // 每片花瓣整体摆动：同一瓣所有粒子用同一个 aPetalPhase，幅度 ≤0.03，
+      // 不再用每个粒子独立的 aSeed 做偏移，花瓣形状不会被吹散。
+      pos.x += sin(uTime * 1.5 + aPetalPhase) * 0.03 * layerSpread;
+      pos.x += sin(uTime * 1.3 + aPetalPhase) * uSway;
+      pos.y += cos(uTime * 1.2 + aPetalPhase) * 0.03 * layerSpread;
       vColor = aColor;
-      // 每个粒子透明度略有不同，避免成千上万个点叠加时全变成一片白
-      vAlpha = 0.55 + 0.45 * aSeed;
+      // 透明度 0.75~0.95：aSeed 0~1 映射到 0.75~0.95
+      vAlpha = 0.75 + 0.20 * aSeed;
       vec4 mv = modelViewMatrix * vec4(pos, 1.0);
       gl_Position = projectionMatrix * mv;
       // 手机上单个点约 5~10 像素，花苞时再缩小 30%，才能看清单颗粒子。
@@ -111,11 +120,11 @@ const flowerMaterial = new THREE.ShaderMaterial({
     varying vec3 vColor;
     varying float vAlpha;
     void main() {
-      // 圆形柔边 + 光晕：越靠近圆心越亮，但亮度上限压低，不再叠加成纯白
+      // 较硬的圆点，不再做光晕式柔边；NormalBlending 下不再叠加成纯白
       float d = length(gl_PointCoord - vec2(0.5));
-      float alpha = smoothstep(0.5, 0.10, d) * vAlpha * 0.9;
+      float alpha = smoothstep(0.5, 0.35, d) * vAlpha;
       if (alpha < 0.01) discard;
-      gl_FragColor = vec4(vColor * (0.55 + 0.45 * (1.0 - d * 2.0)), alpha);
+      gl_FragColor = vec4(vColor * 0.95, alpha);
     }
   `,
 });
@@ -131,33 +140,28 @@ const PINK = [1.0, 0.36, 0.56];
 const PURPLE = [0.70, 0.53, 1.0];
 const LIGHT = [1.0, 0.78, 0.87];
 
-// ---------- 生成粒子花朵（2026-10-28 重瓣牡丹版） ----------
-// 目标：饱满的重瓣牡丹 / 重瓣山茶花，不是空心粒子球，也不是薄壳。
-// 结构：4 层，每层 12 片，共 48 片花瓣 + 花心。
-//   第 0 层 花心内层：最短、最密、最卷曲，长度 1.05，紧紧包围中心
-//   第 1 层 内圈：长度 1.75，朝向中心略弯，互相交叠成紧实内部
-//   第 2 层 中圈：长度 2.45，明显变宽变长，圆润扇形/椭圆形
-//   第 3 层 外圈：长度 3.05，最大最宽，向外舒展，边缘起伏卷曲
-// 每层有独立的半径、角度偏移、深度、宽度、长度、弯曲、颜色，
-// 相邻层角度错开、每片长度/宽度/倾角带随机扰动，避免排成机械圆环。
-//
-// 花瓣几何：每片是独立的三维弯曲曲面，不是薄壳。
-//   沿瓣方向 u（0=根部，1=尖部），横向半宽 halfW(u) = W * sin(pi * u^1.10)^0.8，
-//   根部收窄、中部最宽、尖部圆收；横向采样 v' = sign(v)*v^2，中心密、边缘稀。
-//   曲面：中间隆起（sin(pi*u)*隆起）、横向二次杯状弯曲、每瓣倾角和起伏。
-//   厚度：在曲面法向（近似 z 向）上加 [-thickness, +thickness] 的随机偏移，
-//   让花瓣从侧面看也有体积，而不是一张薄网。
-//   穹顶：整朵花是半球形穹顶，中心向前凸、外缘向后收，
-//   每层的基础深度 + 尖部深度变化（内层尖部向前、外层尖部向后 droop）叠加而成。
-//
-// 花心饱满：不再是空心球。花心由三部分填满：
-//   (a) 金色/暖白球形花心核；(b) 花蕊探出点；(c) 第 0 层短小卷曲花瓣紧密包围。
-//   从花心向外到内圈、中圈、外圈是连续过渡，正面和斜侧面都不留黑色空洞。
-//
-// 颜色（层级区分，但不靠颜色代替几何）：
-//   外层：玫红、桃粉、洋红、紫粉；中层：粉紫、蓝紫、樱花粉、淡紫；
-//   内层：明亮粉色、奶油白、少量金色；花心内层：亮粉、奶油白、金色花蕊。
-//   每片内部按 u 做根部->尖部渐变，边缘向奶油白提亮，中心线略亮。
+// ---------- 生成粒子花朵（2026-10-28 边界清晰版） ----------
+// 只按最新 10 点规格改：NormalBlending 在材质里改；这里只负责几何与采样。
+// 结构：4 层，每层 12/12/14/16 片，共 54 片 + 花心。
+//   第 0 层 花心内层：长度 1.05，z 0.85（最靠前）
+//   第 1 层 内圈：长度 1.75，z 0.55，层间 z 差 0.30
+//   第 2 层 中圈：长度 2.45，z 0.15，层间 z 差 0.40
+//   第 3 层 外圈：长度 3.05，z -0.35，层间 z 差 0.50，根部 30% 暗化 0.55
+// 层间角度：相邻层偏移固定为半个步长，内层花瓣落在外层两片的缝里。
+//   偏移：0 层 0，1 层 0.2618（12 片半步），2 层 0.4862，3 层 0.6825。
+// 花瓣宽度：halfW ≤ 0.32 * 2π * r / count，其中 r = u * length，
+//   即全宽 ≤ 该处弧长间隔的约 65%，相邻花瓣始终留缝。
+// 角度扰动只 ±5% 步长，长度/宽度随机只 ±6%。
+// 奇偶颜色对比：偶数瓣亮度 1.10，奇数瓣 0.90（差约 22%），再加 ±2% 微扰。
+// 粒子分配：默认 40000，花心 8%，其余按花瓣面积分配，每片不少于 600（40000 时）。
+//   分配方法：先给每片 600 保底，剩余按面积（长度 × 中部 capped 宽度）加权分配；
+//   总数不足 54×600 时按面积比例分配。
+// 采样：边缘 65%（调试滑块可调，默认 0.65），叶脉 6%，其余内部。
+//   边缘：沿轮廓带采样，向内指数分布平均 0.08，不向外散逸；
+//   内部：均匀采样，亮度 ×0.75；边缘：亮度 ×1.25、尺寸 ×1.15。
+//   叶脉：沿中心线 lateral=0，u 0.10~0.95，颜色提亮 30%。
+// 尺寸：基础 aSize 整体 ×0.65。
+// 每瓣整体相位：aPetalPhase 同瓣一致，着色器里用它做整体摆动，幅度 ≤0.03。
 const ROSE = [0.93, 0.20, 0.45];
 const MAGENTA = [0.88, 0.18, 0.62];
 const CHERRY = [1.00, 0.55, 0.70];
@@ -169,10 +173,9 @@ const ICEBLUE = [0.60, 0.85, 1.00];
 const CREAM = [1.00, 0.97, 0.88];
 const WARMWHITE = [1.00, 0.98, 0.92];
 
-// 层定义：count、长度、宽度、基础深度、尖部深度变化、隆起、厚度、角度偏移
 const PETAL_LAYERS = [
   {
-    layer: 0, count: 12, length: 1.05, width: 0.55, z: 0.85, tipZ: 0.35, bulge: 0.22, thickness: 0.07, offset: 0.00,
+    layer: 0, count: 12, length: 1.05, width: 0.55, z: 0.85, tipZ: 0.35, bulge: 0.22, thickness: 0.07, offset: 0.0000,
     gradients: [
       [CREAM, CHERRY], [WARMWHITE, ROSE], [CREAM, PEACH], [GOLD, CHERRY],
       [CREAM, ROSE], [WARMWHITE, CHERRY], [CREAM, PEACH], [GOLD, ROSE],
@@ -180,7 +183,7 @@ const PETAL_LAYERS = [
     ],
   },
   {
-    layer: 1, count: 12, length: 1.75, width: 0.78, z: 0.55, tipZ: 0.22, bulge: 0.28, thickness: 0.09, offset: 0.26,
+    layer: 1, count: 12, length: 1.75, width: 0.78, z: 0.55, tipZ: 0.22, bulge: 0.28, thickness: 0.09, offset: 0.2618,
     gradients: [
       [CREAM, CHERRY], [PEACH, ROSE], [CREAM, MAGENTA], [WARMWHITE, CHERRY],
       [PEACH, ROSE], [CREAM, CHERRY], [WARMWHITE, MAGENTA], [PEACH, CHERRY],
@@ -188,55 +191,55 @@ const PETAL_LAYERS = [
     ],
   },
   {
-    layer: 2, count: 12, length: 2.45, width: 0.92, z: 0.15, tipZ: -0.08, bulge: 0.32, thickness: 0.11, offset: 0.52,
+    layer: 2, count: 14, length: 2.45, width: 0.92, z: 0.15, tipZ: -0.08, bulge: 0.32, thickness: 0.11, offset: 0.4862,
     gradients: [
       [LILAC, VIOLET], [CHERRY, BLUEPURPLE], [PEACH, VIOLET], [LILAC, CHERRY],
       [ICEBLUE, VIOLET], [CHERRY, LILAC], [LILAC, BLUEPURPLE], [PEACH, VIOLET],
       [CHERRY, VIOLET], [LILAC, CHERRY], [ICEBLUE, BLUEPURPLE], [PEACH, LILAC],
+      [LILAC, VIOLET], [CHERRY, BLUEPURPLE],
     ],
   },
   {
-    layer: 3, count: 12, length: 3.05, width: 1.02, z: -0.35, tipZ: -0.48, bulge: 0.30, thickness: 0.13, offset: 0.13,
+    layer: 3, count: 16, length: 3.05, width: 1.02, z: -0.35, tipZ: -0.48, bulge: 0.30, thickness: 0.13, offset: 0.6825,
     gradients: [
       [PEACH, ROSE], [CHERRY, MAGENTA], [PEACH, MAGENTA], [CREAM, ROSE],
       [CHERRY, ROSE], [PEACH, MAGENTA], [CREAM, MAGENTA], [CHERRY, ROSE],
       [PEACH, ROSE], [CREAM, MAGENTA], [CHERRY, MAGENTA], [PEACH, ROSE],
+      [PEACH, MAGENTA], [CHERRY, ROSE], [CREAM, MAGENTA], [PEACH, ROSE],
     ],
   },
 ];
 const PETALS = [];
 for (const layer of PETAL_LAYERS) {
   for (let k = 0; k < layer.count; k++) {
-    // 每片独立扰动：长度/宽度 ±12%，角度在步长内错开，避免机械圆环
     const step = (Math.PI * 2) / layer.count;
+    const midR = 0.53 * layer.length;
+    const capMid = 0.32 * 2 * Math.PI * midR / layer.count;
     PETALS.push({
       layer: layer.layer,
-      length: layer.length * (0.85 + Math.random() * 0.30),
-      width: layer.width * (0.85 + Math.random() * 0.30),
-      // 每片独立亮度：相邻花瓣亮度差 0.85~1.07，靠亮度差也能分清分界
-      brightness: 0.85 + Math.random() * 0.22,
+      count: layer.count,
+      // 长度/宽度随机只 ±6%
+      length: layer.length * (0.94 + Math.random() * 0.12),
+      width: layer.width * (0.94 + Math.random() * 0.12),
+      // 奇偶对比：偶数 1.10，奇数 0.90，差约 22%，再加 ±2% 微扰
+      brightness: (k % 2 === 0 ? 1.10 : 0.90) * (0.98 + Math.random() * 0.04),
+      phase: Math.random() * Math.PI * 2,
       z: layer.z,
       tipZ: layer.tipZ,
       bulge: layer.bulge,
       thickness: layer.thickness,
-      angle: layer.offset + k * step + (Math.random() - 0.5) * step * 0.55,
+      // 角度扰动只 ±5% 步长
+      angle: layer.offset + k * step + (Math.random() - 0.5) * step * 0.10,
       tilt: (Math.random() - 0.5) * 0.34,
       wobble: Math.random() * Math.PI * 2,
       inner: layer.gradients[k % layer.gradients.length][0],
       outer: layer.gradients[k % layer.gradients.length][1],
-      weight: layer.length * layer.width,
+      // 面积权重：用 capped 后的中部宽度估算，分配粒子时用
+      weight: layer.length * capMid,
     });
   }
 }
 const PETAL_TOTAL_WEIGHT = PETALS.reduce((s, p) => s + p.weight, 0);
-function pickPetal() {
-  let r = Math.random() * PETAL_TOTAL_WEIGHT;
-  for (const p of PETALS) {
-    r -= p.weight;
-    if (r <= 0) return p;
-  }
-  return PETALS[PETALS.length - 1];
-}
 
 function buildFlower(count) {
   if (flowerPoints) {
@@ -249,72 +252,98 @@ function buildFlower(count) {
   const sizes = new Float32Array(count);
   const seeds = new Float32Array(count);
   const layers = new Float32Array(count);
+  const phases = new Float32Array(count);
+  let idx = 0;
 
-  for (let i = 0; i < count; i++) {
-    const r = Math.random();
-    let cx, cy, cz, ox, oy, oz, col, size, seed, layerIndex;
-    seed = Math.random();
+  function writeParticle(cx, cy, cz, ox, oy, oz, col, size, seed, layerIndex, phase) {
+    closed[idx * 3] = cx; closed[idx * 3 + 1] = cy; closed[idx * 3 + 2] = cz;
+    open[idx * 3] = ox; open[idx * 3 + 1] = oy; open[idx * 3 + 2] = oz;
+    colors[idx * 3] = col[0]; colors[idx * 3 + 1] = col[1]; colors[idx * 3 + 2] = col[2];
+    sizes[idx] = size; seeds[idx] = seed; layers[idx] = layerIndex; phases[idx] = phase;
+    idx++;
+  }
 
-    if (r < 0.14) {
-      // ---- 花心核 + 花蕊：实心填满，不留空洞 ----
-      layerIndex = 0;
-      const isStamen = Math.random() < 0.38;
-      const th = Math.random() * Math.PI * 2;
-      const ph = Math.acos(2 * Math.random() - 1);
-      // 球体内部均匀采样（半径开立方），不是只在球壳上
-      const rr = isStamen
-        ? 0.45 + Math.random() * 0.30
-        : 0.50 * Math.cbrt(Math.random());
-      ox = Math.sin(ph) * Math.cos(th) * rr;
-      oy = Math.sin(ph) * Math.sin(th) * rr;
-      oz = 0.55 + Math.cos(ph) * rr * 0.7;
-      cx = ox * 0.70;
-      cy = oy * 0.70;
-      cz = 0.35;
-      const t = Math.random();
-      col = mixColor(GOLD, WARMWHITE, t);
-      if (isStamen && Math.random() < 0.30) col = WARMWHITE;
-      size = isStamen ? 0.7 + Math.random() * 0.5 : 0.9 + Math.random() * 0.6;
-    } else {
-      // ---- 花瓣：单片独立采样，边缘密集、内部稀疏 ----
-      // 关键：这不是只调透明度，而是真正的采样概率/空间分布。
-      //   边缘组（约 55%）：粒子沿单片花瓣的轮廓带采样——
-      //     70% 沿两侧边缘：u 均匀，横向在轮廓内侧按指数分布向内散开，
-      //       平均向内约 0.16 个单位，带宽很窄，所以单位面积密度很高；
-      //     20% 沿尖部弧线：u 在 0.90~1.00，横向铺满尖部；
-      //     10% 沿根部：u 在 0~0.10，与花心衔接；
-      //     另有约 12% 的侧缘粒子允许向外散逸最多 0.07，形成轻盈感，但不破坏轮廓。
-      //   内部组（约 45%）：u、横向都均匀采样在 0.08~0.92、-0.85~0.85 范围内，
-      //     不再向中心线集中，所以内部单位面积密度明显低于边缘带，
-      //     但仍有粒子填满整片，不会变成空心的轮廓线。
-      // 边缘距离：sideDist = 到侧缘的横向距离，tipDist = 到尖部的纵向距离，
-      //   baseDist = 到根部的纵向距离，edgeDist = 三者最小值（世界单位）。
-      //   亮度和大小也随 edgeDist 变化：越靠近边缘越亮、稍大，内部较暗、较小，
-      //   但这只是对采样密度的加强，不是代替采样密度。
-      const petal = pickPetal();
-      layerIndex = petal.layer;
-      const isEdge = Math.random() < 0.55;
-      let u, lateral, halfW, edgeDist;
-      const halfWAt = (uu) => petal.width * Math.pow(Math.sin(Math.PI * Math.pow(uu, 1.10)), 0.8);
-      if (isEdge) {
+  // ---- 花心：8% ----
+  const centerCount = Math.round(count * 0.08);
+  for (let i = 0; i < centerCount && idx < count; i++) {
+    const isStamen = Math.random() < 0.38;
+    const th = Math.random() * Math.PI * 2;
+    const ph = Math.acos(2 * Math.random() - 1);
+    const rr = isStamen ? 0.45 + Math.random() * 0.30 : 0.50 * Math.cbrt(Math.random());
+    const ox = Math.sin(ph) * Math.cos(th) * rr;
+    const oy = Math.sin(ph) * Math.sin(th) * rr;
+    const oz = 0.55 + Math.cos(ph) * rr * 0.7;
+    let col = mixColor(GOLD, WARMWHITE, Math.random());
+    if (isStamen && Math.random() < 0.30) col = WARMWHITE;
+    const size = (isStamen ? 0.7 + Math.random() * 0.5 : 0.9 + Math.random() * 0.6) * 0.65;
+    writeParticle(ox * 0.70, oy * 0.70, 0.35, ox, oy, oz, col, size, Math.random(), 0, 0);
+  }
+
+  // ---- 花瓣粒子数分配：每片不少于 600（总数够时） ----
+  const petalTotal = count - centerCount;
+  const petalCounts = new Array(PETALS.length).fill(0);
+  if (petalTotal >= PETALS.length * 600) {
+    let remaining = petalTotal - PETALS.length * 600;
+    for (let p = 0; p < PETALS.length; p++) petalCounts[p] = 600;
+    // 剩余按面积加权分配，用最大余数法保证总数精确
+    const raw = PETALS.map((p) => remaining * p.weight / PETAL_TOTAL_WEIGHT);
+    let assigned = 0;
+    for (let p = 0; p < PETALS.length; p++) {
+      const f = Math.floor(raw[p]);
+      petalCounts[p] += f; assigned += f;
+    }
+    let left = remaining - assigned;
+    const order = PETALS.map((p, i) => [raw[i] - Math.floor(raw[i]), i]).sort((a, b) => b[0] - a[0]);
+    for (let j = 0; j < left && j < order.length; j++) petalCounts[order[j][1]]++;
+  } else {
+    const raw = PETALS.map((p) => petalTotal * p.weight / PETAL_TOTAL_WEIGHT);
+    let assigned = 0;
+    for (let p = 0; p < PETALS.length; p++) {
+      const f = Math.floor(raw[p]);
+      petalCounts[p] = f; assigned += f;
+    }
+    let left = petalTotal - assigned;
+    const order = PETALS.map((p, i) => [raw[i] - Math.floor(raw[i]), i]).sort((a, b) => b[0] - a[0]);
+    for (let j = 0; j < left && j < order.length; j++) petalCounts[order[j][1]]++;
+  }
+
+  // ---- 每片独立生成 ----
+  for (let pi = 0; pi < PETALS.length; pi++) {
+    const petal = PETALS[pi];
+    const n = petalCounts[pi];
+    // 宽度函数：先按原始轮廓算，再按角间隔 cap，最后乘调试宽度系数
+    const halfWAt = (uu) => {
+      const rawW = petal.width * Math.pow(Math.sin(Math.PI * Math.pow(uu, 1.10)), 0.8);
+      const cap = 0.32 * 2 * Math.PI * (uu * petal.length) / petal.count;
+      return Math.min(rawW, cap) * petalWidthCoeff;
+    };
+    for (let j = 0; j < n && idx < count; j++) {
+      // 类型：边缘 edgeRatio（默认 0.65），叶脉 6%，其余内部
+      const typeRoll = Math.random();
+      const isVein = typeRoll < 0.06;
+      const isEdge = !isVein && typeRoll < 0.06 + edgeRatio;
+      let u, lateral, halfW, edgeDist = 1;
+      if (isVein) {
+        // 叶脉：沿中心线，u 0.10~0.95，横向几乎为 0
+        u = 0.10 + Math.random() * 0.85;
+        halfW = halfWAt(u);
+        lateral = (Math.random() * 2 - 1) * 0.02 * halfW;
+        edgeDist = 0.5;
+      } else if (isEdge) {
         const seg = Math.random();
         if (seg < 0.70) {
           u = 0.08 + Math.random() * 0.84;
           halfW = halfWAt(u);
           const side = Math.random() < 0.5 ? -1 : 1;
-          if (Math.random() < 0.12) {
-            lateral = side * (halfW + Math.random() * 0.07); // 少量向外散逸
-            edgeDist = 0;
-          } else {
-            const inward = -Math.log(1 - Math.random() * 0.95) * 0.16;
-            lateral = side * Math.max(0, halfW - inward);
-            edgeDist = Math.min(inward, halfW);
-          }
+          // 向内指数分布，平均 0.08，不向外散逸
+          const inward = -Math.log(1 - Math.random() * 0.95) * 0.08;
+          lateral = side * Math.max(0, halfW - inward);
+          edgeDist = Math.min(inward, halfW);
         } else if (seg < 0.90) {
           u = 0.90 + Math.random() * 0.10;
           halfW = halfWAt(u);
           const vv = Math.random() * 2 - 1;
-          lateral = vv * halfW * (0.90 + Math.random() * 0.15);
+          lateral = vv * halfW * (0.90 + Math.random() * 0.10);
           edgeDist = Math.min((1 - u) * petal.length, (1 - Math.abs(vv)) * halfW);
         } else {
           u = Math.random() * 0.10;
@@ -330,79 +359,92 @@ function buildFlower(count) {
         lateral = vv * halfW;
         edgeDist = Math.min((1 - Math.abs(vv)) * halfW, u * petal.length, (1 - u) * petal.length);
       }
-      // 下面 open/closed 都用同一组 (u, lateral)，边缘和内部粒子都附着在
-      // 各自花瓣的局部坐标上，随花瓣折叠一起变形，不会脱离花瓣。
       const radial = u * petal.length;
-      // 曲面：基础深度 + 尖部深度变化 + 中间隆起 + 横向杯状弯曲 + 起伏
       let localZ = petal.z
         + u * petal.tipZ
         + Math.sin(Math.PI * u) * petal.bulge
         + lateral * lateral * 0.22
         + Math.sin(u * 5.0 + petal.wobble) * 0.07;
-      // 厚度：沿法向（近似 z 向）随机偏移，让花瓣有体积感
       localZ += (Math.random() * 2 - 1) * petal.thickness;
       const cosT = Math.cos(petal.tilt), sinT = Math.sin(petal.tilt);
       const lat2 = lateral * cosT - localZ * sinT * 0.35;
       const z2 = lateral * sinT * 0.35 + localZ;
       const cosA = Math.cos(petal.angle), sinA = Math.sin(petal.angle);
-      ox = cosA * radial - sinA * lat2;
-      oy = sinA * radial + cosA * lat2;
-      oz = z2;
-
-      // ---- 花苞：花瓣折叠收拢（逐层参数在着色器外由层级 spread 控制） ----
-      // 折叠角随 u 增大：根部基本不动，尖部向前折；内层折得更紧、外层折得更开，
-      // 这样花苞仍是圆润饱满的盘面，而不是竖线或整体缩放。
-      const foldBase = 1.05 - petal.layer * 0.12; // 内层约 60 度，外层约 42 度
+      const ox = cosA * radial - sinA * lat2;
+      const oy = sinA * radial + cosA * lat2;
+      const oz = z2;
+      const foldBase = 1.05 - petal.layer * 0.12;
       const fold = u * foldBase;
       const cosF = Math.cos(fold), sinF = Math.sin(fold);
       const radialClosed = radial * cosF * 0.80 + 0.12;
       const lateralClosed = lat2 * (0.35 + 0.65 * cosF);
       const cxRaw = cosA * radialClosed - sinA * lateralClosed;
       const cyRaw = sinA * radialClosed + cosA * lateralClosed;
-      cx = cxRaw * 0.88;
-      cy = cyRaw * 1.10 + 0.05;
-      cz = petal.z * 0.3 + radial * sinF * 0.45 + 0.25;
+      const cx = cxRaw * 0.88;
+      const cy = cyRaw * 1.10 + 0.05;
+      const cz = petal.z * 0.3 + radial * sinF * 0.45 + 0.25;
 
       const tt = u * u * (3 - 2 * u);
-      col = mixColor(petal.inner, petal.outer, tt);
-      // 亮度梯度：edgeDist 越小（越靠近轮廓）越亮；内部较暗、较小。
-      // 这只是加强，不是代替采样密度——密度差已经由上面的边缘/内部分组决定。
-      // edgeDist 0~0.35 个单位内从亮到暗平滑过渡，超过 0.35 按内部处理。
-      const edgeBright = Math.max(0, 1 - edgeDist / 0.35);
-      col = mixColor(col, CREAM, edgeBright * 0.28);
-      col = mixColor(col, WARMWHITE, edgeBright * 0.10);
-      // 每片独立亮度，让相邻花瓣即使颜色相近也能靠亮度分清
+      let col = mixColor(petal.inner, petal.outer, tt);
+      // 外层根部 30% 暗化，模拟被内层遮挡的阴影
+      if (petal.layer === 3 && u < 0.30) {
+        col = [col[0] * 0.55, col[1] * 0.55, col[2] * 0.55];
+      }
+      // 奇偶亮度对比（已在 petal.brightness 里）
       col = [col[0] * petal.brightness, col[1] * petal.brightness, col[2] * petal.brightness];
-      if (isEdge) {
-        size = 1.10 + Math.random() * 0.50;
-        seed = 0.85 + Math.random() * 0.15; // 边缘粒子在着色器里透明度更高
+      let size, seed;
+      if (isVein) {
+        // 叶脉：比本色提亮 30%，尺寸略大
+        col = [Math.min(1, col[0] * 1.30), Math.min(1, col[1] * 1.30), Math.min(1, col[2] * 1.30)];
+        size = (0.90 + Math.random() * 0.30) * 0.65 * 1.20;
+        seed = 0.90 + Math.random() * 0.10;
+      } else if (isEdge) {
+        const edgeBright = Math.max(0, 1 - edgeDist / 0.35);
+        col = mixColor(col, CREAM, edgeBright * 0.15);
+        // 边缘亮度 ×1.25、尺寸 ×1.15（相对内部基准）
+        col = [Math.min(1, col[0] * 1.25), Math.min(1, col[1] * 1.25), Math.min(1, col[2] * 1.25)];
+        size = (0.85 + Math.random() * 0.30) * 0.65 * 1.15;
+        seed = 0.85 + Math.random() * 0.15;
       } else {
-        size = 0.80 + Math.random() * 0.35;
-        seed = 0.30 + Math.random() * 0.40; // 内部粒子较细、较淡，但数量仍在
+        // 内部亮度 ×0.75
+        col = [col[0] * 0.75, col[1] * 0.75, col[2] * 0.75];
+        size = (0.85 + Math.random() * 0.30) * 0.65;
+        seed = 0.30 + Math.random() * 0.40;
       }
-      if (Math.random() < 0.05) {
-        col = CREAM;
-        size = 1.4 + Math.random() * 0.8;
-        seed = 0.95 + Math.random() * 0.05;
-      }
+      writeParticle(cx, cy, cz, ox, oy, oz, col, size, seed, petal.layer, petal.phase);
     }
-
-    closed[i * 3] = cx; closed[i * 3 + 1] = cy; closed[i * 3 + 2] = cz;
-    open[i * 3] = ox; open[i * 3 + 1] = oy; open[i * 3 + 2] = oz;
-    colors[i * 3] = col[0]; colors[i * 3 + 1] = col[1]; colors[i * 3 + 2] = col[2];
-    sizes[i] = size;
-    seeds[i] = seed;
-    layers[i] = layerIndex;
   }
 
+  // ---- 排序：按盛开 z 从后到前画，NormalBlending 下内层（靠前）才能自然遮住外层根部 ----
+  // depthWrite 保持 false，所以不能靠深度缓冲遮挡，只能靠绘制顺序。
+  const order = new Array(idx);
+  for (let i = 0; i < idx; i++) order[i] = i;
+  order.sort((a, b) => open[a * 3 + 2] - open[b * 3 + 2]);
+  function reorder(src, itemSize) {
+    const out = new Float32Array(idx * itemSize);
+    for (let i = 0; i < idx; i++) {
+      const s = order[i];
+      for (let k = 0; k < itemSize; k++) out[i * itemSize + k] = src[s * itemSize + k];
+    }
+    return out;
+  }
+  const closedS = reorder(closed, 3);
+  const openS = reorder(open, 3);
+  const colorsS = reorder(colors, 3);
+  const sizesS = reorder(sizes, 1);
+  const seedsS = reorder(seeds, 1);
+  const layersS = reorder(layers, 1);
+  const phasesS = reorder(phases, 1);
+
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(open, 3)); // 占位，真实位置在着色器里算
-  geo.setAttribute('aClosed', new THREE.BufferAttribute(closed, 3));
-  geo.setAttribute('aOpen', new THREE.BufferAttribute(open, 3));
-  geo.setAttribute('aColor', new THREE.BufferAttribute(colors, 3));
-  geo.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
-  geo.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1));
-  geo.setAttribute('aLayer', new THREE.BufferAttribute(layers, 1));
+  geo.setAttribute('position', new THREE.BufferAttribute(openS, 3)); // 占位，真实位置在着色器里算
+  geo.setAttribute('aClosed', new THREE.BufferAttribute(closedS, 3));
+  geo.setAttribute('aOpen', new THREE.BufferAttribute(openS, 3));
+  geo.setAttribute('aColor', new THREE.BufferAttribute(colorsS, 3));
+  geo.setAttribute('aSize', new THREE.BufferAttribute(sizesS, 1));
+  geo.setAttribute('aSeed', new THREE.BufferAttribute(seedsS, 1));
+  geo.setAttribute('aLayer', new THREE.BufferAttribute(layersS, 1));
+  geo.setAttribute('aPetalPhase', new THREE.BufferAttribute(phasesS, 1));
   flowerPoints = new THREE.Points(geo, flowerMaterial);
   flowerPoints.frustumCulled = false;
   flowerGroup.add(flowerPoints);
@@ -627,6 +669,22 @@ optCount.addEventListener('change', () => buildFlower(parseInt(optCount.value, 1
 optDim.addEventListener('input', () => {
   videoDimEl.style.background = 'rgba(5, 3, 10, ' + (optDim.value / 100) + ')';
 });
+// 调试滑块：只改重建用的宽度系数 / 边缘占比，不重置手势、spread、摄像头和任何参数。
+// input 时只更新读数，change（松开滑块）时才重建，避免拖动过程中反复生成 40000 个粒子卡顿。
+if (optWidth) {
+  optWidth.addEventListener('input', () => {
+    petalWidthCoeff = parseFloat(optWidth.value);
+    if (optWidthValue) optWidthValue.textContent = petalWidthCoeff.toFixed(2);
+  });
+  optWidth.addEventListener('change', () => buildFlower(parseInt(optCount.value, 10)));
+}
+if (optEdge) {
+  optEdge.addEventListener('input', () => {
+    edgeRatio = parseFloat(optEdge.value);
+    if (optEdgeValue) optEdgeValue.textContent = Math.round(edgeRatio * 100) + '%';
+  });
+  optEdge.addEventListener('change', () => buildFlower(parseInt(optCount.value, 10)));
+}
 
 // ---------- 尺寸 ----------
 // 竖屏下花朵直径（约 6 个单位）会超出画面宽度，只剩中间一竖条，
@@ -648,7 +706,7 @@ window.addEventListener('resize', resize);
 
 // ---------- 主循环 ----------
 const clock = new THREE.Clock();
-buildFlower(12000);
+buildFlower(40000);
 resize();
 
 renderer.setAnimationLoop(() => {
